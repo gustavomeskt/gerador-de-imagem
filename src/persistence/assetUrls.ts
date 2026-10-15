@@ -25,3 +25,8 @@ export function releaseAssetUrl(assetId: string) {
   urls.delete(assetId)
   if (url.startsWith('blob:') && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(url)
 }
+
+// URL já criada para este arquivo (sem carregar nada).
+export function peekAssetUrl(assetId: string): string | undefined {
+  return urls.get(assetId)
+}

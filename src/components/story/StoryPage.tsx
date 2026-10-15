@@ -5,8 +5,9 @@ import { useStoryStore, type InterpretResult } from '../../store/useStoryStore'
 import StoryCharactersTab from './StoryCharactersTab'
 import StoryCopyTab from './StoryCopyTab'
 import StoryboardTab from './StoryboardTab'
+import StoryImagesTab from './StoryImagesTab'
 
-type Tab = 'copy' | 'characters' | 'storyboard'
+type Tab = 'copy' | 'characters' | 'storyboard' | 'images'
 
 function resultMessage(r: InterpretResult): { text: string; error: boolean } {
   if (!r.ok) return { text: r.error, error: !r.cancelled }
@@ -31,6 +32,8 @@ export default function StoryPage({ flowId, onBack }: { flowId: string; onBack: 
   const [tab, setTab] = useState<Tab>(board.scenes.length ? 'storyboard' : 'copy')
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null)
 
+  const imageCount = board.scenes.filter((s) => s.officialImageId).length
+  const notify = (text: string, error = false) => setMessage({ text, error })
   const pendingChars = board.characters.filter((c) => c.matchStatus === 'ambiguous' || c.matchStatus === 'unregistered').length
 
   async function handleInterpret() {
@@ -60,6 +63,9 @@ export default function StoryPage({ flowId, onBack }: { flowId: string; onBack: 
           <button type="button" role="tab" aria-selected={tab === 'storyboard'} onClick={() => setTab('storyboard')}>
             Storyboard ({board.scenes.length})
           </button>
+          <button type="button" role="tab" aria-selected={tab === 'images'} onClick={() => setTab('images')}>
+            Imagens ({imageCount}/{board.scenes.length})
+          </button>
         </nav>
       </header>
 
@@ -86,7 +92,8 @@ export default function StoryPage({ flowId, onBack }: { flowId: string; onBack: 
       <main className="ifs-story__main">
         {tab === 'copy' && <StoryCopyTab board={board} onInterpret={handleInterpret} />}
         {tab === 'characters' && <StoryCharactersTab board={board} />}
-        {tab === 'storyboard' && <StoryboardTab board={board} />}
+        {tab === 'storyboard' && <StoryboardTab board={board} onMessage={notify} />}
+        {tab === 'images' && <StoryImagesTab board={board} onMessage={notify} />}
       </main>
     </div>
   )

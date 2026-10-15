@@ -102,7 +102,7 @@ describe('exportação em ZIP', () => {
 
   it('o manifest descreve projeto, grupos, origem e o que ficou de fora', async () => {
     const { manifest } = await exportAndOpen()
-    expect(manifest.formatVersion).toBe(1)
+    expect(manifest.formatVersion).toBe(2)
     expect(manifest.project).toEqual({
       id: 'f1',
       name: 'Gelatina — Cena da Cozinha!',

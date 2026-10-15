@@ -10,7 +10,7 @@ import {
   type ReferenceImageInput,
   type ReferenceMimeType,
 } from '../src/generation/references'
-import type { ImageGenerationRequest, ImageJob } from '../src/generation/types'
+import type { BatchImageJob, ImageGenerationRequest, ImageJob } from '../src/generation/types'
 import type { ServerConfig } from './config'
 import { HttpError } from './http'
 
@@ -173,13 +173,25 @@ function readReferenceDescriptors(list: unknown[], config: ServerConfig): Refere
 // Com "references", vira uma edição com as fotos (endpoint /v1/images/edits).
 export function validateGenerateBody(body: unknown, config: ServerConfig): ImageGenerationRequest {
   const obj = asObject(body)
-  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'n', 'references', 'inputFidelity'])
+  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'n', 'references', 'inputFidelity', 'deferredReferences'])
   const params = readImageParams(obj, config)
   const n = readPositiveInt(obj.n, 'n', Math.min(MODEL_MAX_N[params.model], config.maxImagesPerJob))
   const list = referencesArray(obj.references, config, params.model)
   const references = list ? readReferenceImages(list, config) : undefined
   const inputFidelity = readFidelity(obj.inputFidelity, params.model, !!references)
-  return { ...params, n, ...(references ? { references } : {}), ...(inputFidelity ? { inputFidelity } : {}) }
+  let deferredReferences: number | undefined
+  if (obj.deferredReferences !== undefined && obj.deferredReferences !== null) {
+    if (!references) invalid('"deferredReferences" só pode ser usado com imagens de referência.')
+    deferredReferences = readPositiveInt(obj.deferredReferences, 'deferredReferences', references.length)
+    if (n !== 1) invalid('"deferredReferences" só vale para gerações de 1 imagem (lote do storyboard).')
+  }
+  return {
+    ...params,
+    n,
+    ...(references ? { references } : {}),
+    ...(inputFidelity ? { inputFidelity } : {}),
+    ...(deferredReferences ? { deferredReferences } : {}),
+  }
 }
 
 // POST /api/images/quote — orçamento de um trabalho inteiro (todas as imagens
@@ -194,6 +206,52 @@ export function validateImageJob(body: unknown, config: ServerConfig): ImageJob 
   const references = list ? readReferenceDescriptors(list, config) : undefined
   const inputFidelity = readFidelity(obj.inputFidelity, params.model, !!references)
   return { ...params, totalImages, ...(references ? { references } : {}), ...(inputFidelity ? { inputFidelity } : {}) }
+}
+
+// POST /api/images/batch-quote — orçamento do lote do storyboard: uma imagem
+// por item, cada item com o próprio prompt e as próprias referências
+// (identificadas pelo hash). deferredReferences = imagens de cenas anteriores
+// do mesmo lote, que ainda não existem na hora do orçamento.
+export function validateBatchJob(body: unknown, config: ServerConfig): BatchImageJob {
+  const obj = asObject(body)
+  rejectUnknownFields(obj, ['model', 'size', 'quality', 'inputFidelity', 'items'])
+  if (!Array.isArray(obj.items) || obj.items.length === 0) invalid('"items" precisa ser uma lista com pelo menos uma cena.')
+  if (obj.items.length > config.maxImagesPerBatch) {
+    invalid(`O lote passa do limite de ${config.maxImagesPerBatch} imagens (MAX_IMAGES_PER_BATCH).`)
+  }
+  const first = asObject(obj.items[0])
+  const params = readImageParams({ ...obj, prompt: first.prompt }, config)
+  let anyReferences = false
+  const items = obj.items.map((raw, i) => {
+    const item = asObject(raw)
+    const label = `Cena ${i + 1}`
+    for (const key of Object.keys(item)) {
+      if (!['prompt', 'references', 'deferredReferences'].includes(key)) invalid(`${label}: campo não permitido "${key}".`)
+    }
+    const prompt = readPrompt(item.prompt, MODEL_PROMPT_LIMITS[params.model])
+    const list = item.references === undefined || item.references === null ? undefined : referencesArray(item.references, config, params.model)
+    const references = list ? readReferenceDescriptors(list, config) : undefined
+    let deferredReferences = 0
+    if (item.deferredReferences !== undefined && item.deferredReferences !== null) {
+      if (typeof item.deferredReferences !== 'number' || !Number.isInteger(item.deferredReferences) || item.deferredReferences < 0) {
+        invalid(`${label}: "deferredReferences" precisa ser um inteiro.`)
+      }
+      deferredReferences = item.deferredReferences
+    }
+    const total = (references?.length ?? 0) + deferredReferences
+    if (total > 0) {
+      if (!REFERENCE_SUPPORT[params.model]) {
+        throw new HttpError(400, 'references_not_supported', `O modelo ${params.model} não aceita imagens de referência.`)
+      }
+      const limit = Math.min(config.maxReferenceImages, REFERENCE_SUPPORT[params.model]!.maxImages)
+      if (total > limit) invalid(`${label}: no máximo ${limit} imagens de referência por geração.`)
+      if (deferredReferences > 0 && !references?.length) invalid(`${label}: imagens de cenas anteriores exigem as fotos dos personagens.`)
+      anyReferences = true
+    }
+    return { prompt, ...(references ? { references } : {}), ...(deferredReferences ? { deferredReferences } : {}) }
+  })
+  const inputFidelity = readFidelity(obj.inputFidelity, params.model, anyReferences)
+  return { model: params.model, size: params.size, quality: params.quality, ...(inputFidelity ? { inputFidelity } : {}), items }
 }
 
 // POST /api/prompts/enhance e /api/prompts/quote

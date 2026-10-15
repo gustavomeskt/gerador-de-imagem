@@ -198,3 +198,48 @@ export function estimateStory(
     notes,
   }
 }
+
+// Lote do storyboard: soma das estimativas de cada cena (1 imagem cada, com
+// as referências daquela cena — inclusive as de cenas anteriores).
+export function estimateBatch(
+  job: {
+    model: ImageModel
+    size: string
+    quality?: string
+    inputFidelity?: InputFidelity
+    items: Array<{ prompt: string; references?: ReferenceDescriptor[]; deferredReferences?: number }>
+  },
+  prices: PriceTable,
+): Estimate & { perItem: number[] } {
+  const perItem = job.items.map((item) => {
+    const refs = [
+      ...(item.references ?? []),
+      ...Array.from({ length: item.deferredReferences ?? 0 }, () => item.references![0]),
+    ]
+    const hasRefs = refs.length > 0
+    return estimateImageJob(
+      {
+        model: job.model,
+        prompt: item.prompt,
+        size: job.size,
+        quality: job.quality,
+        totalImages: 1,
+        ...(hasRefs ? { references: refs, inputFidelity: job.inputFidelity } : {}),
+      },
+      prices,
+    ).usd
+  })
+  const total = perItem.reduce((a, b) => a + b, 0)
+  const refsTotal = job.items.reduce((sum, it) => sum + (it.references?.length ?? 0) + (it.deferredReferences ?? 0), 0)
+  const deferred = job.items.reduce((sum, it) => sum + (it.deferredReferences ?? 0), 0)
+  const quality = pricingQuality(job.model, job.quality)
+  const breakdown = [
+    `${job.items.length} imagem(ns), uma por cena (${job.model}, ${quality}, ${job.size})`,
+    `por cena: de ${usd(Math.min(...perItem))} a ${usd(Math.max(...perItem))} (prompt e referências de cada cena)`,
+    `${refsTotal} foto(s) de referência no total${deferred ? `, ${deferred} delas de cenas anteriores do lote` : ''}`,
+  ]
+  const notes = [`Estimativa com preços de referência (${PRICES_REFERENCE_DATE}); a cobrança real é a da fatura da OpenAI.`]
+  if (!job.quality || job.quality === 'auto') notes.push('Qualidade "auto" foi orçada como "high" (pior caso).')
+  if (refsTotal) notes.push('Referências orçadas pelo limite superior de tokens por imagem; o valor real tende a ser menor.')
+  return { usd: total, breakdown, notes, perItem }
+}

@@ -78,10 +78,13 @@ export function renderMockSvg(params: {
 }): string {
   const { width, height } = parseSize(params.size)
   const hue = hashString(params.prompt) % 360
+  // prompts montados (fichas, guia de estilo…) começam sempre iguais: mostra
+  // a parte da CENA, que é o que diferencia uma imagem da outra
+  const display = params.prompt.replace(/Reference images are attached[\s\S]*?\nScene: |Project style guide:[\s\S]*?\nScene: /, '')
   const hue2 = (hue + 40 + params.index * 23) % 360
   const fontSize = Math.round(Math.min(width, height) / 22)
   const lineHeight = Math.round(fontSize * 1.35)
-  const lines = wrapText(params.prompt, Math.floor(width / (fontSize * 0.55)), 8)
+  const lines = wrapText(display, Math.floor(width / (fontSize * 0.55)), 8)
   const startY = Math.round(height / 2 - (lines.length * lineHeight) / 2)
 
   const text = lines

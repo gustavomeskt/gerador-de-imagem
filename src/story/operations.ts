@@ -91,7 +91,8 @@ export function applyInterpretation(
     }
   }
 
-  const approved = next.scenes.filter((s) => s.status === 'approved')
+  // aprovadas e cenas que já têm imagem gerada ficam como estão
+  const approved = next.scenes.filter((s) => s.status === 'approved' || (s.images?.length ?? 0) > 0)
   const overlaps = (a: StoryScene, b: StoryScene) => a.source.start < b.source.end && b.source.start < a.source.end
   const freshScenes = built.scenes
     .filter((s) => !approved.some((a) => overlaps(a, s)))
@@ -100,7 +101,7 @@ export function applyInterpretation(
       characterKeys: s.characterKeys.map((k) => keyMap.get(k) ?? k),
       speakerKey: s.speakerKey ? (keyMap.get(s.speakerKey) ?? s.speakerKey) : null,
     }))
-  const notApproved = next.scenes.filter((s) => s.status !== 'approved')
+  const notApproved = next.scenes.filter((s) => !approved.includes(s))
   const scenes = withParts([...approved, ...freshScenes].sort((a, b) => a.source.start - b.source.start))
 
   const summary: ApplySummary = {
@@ -182,6 +183,8 @@ export function splitScene(board: Storyboard, sceneId: string, makeId: (p: strin
     first = { ...s }
     second = { ...s, id: makeId('cena') }
   }
+  // as imagens já geradas ficam com a primeira parte; a nova parte começa sem imagem
+  second = { ...second, images: [], officialImageId: null, imageApprovedAt: null }
   const reset = { status: 'pending' as SceneStatus, origin: 'split' as const, updatedAt: now, promptOverride: undefined }
   const scenes = [...board.scenes]
   scenes.splice(index, 1, { ...first, ...reset }, { ...second, ...reset })
@@ -218,6 +221,10 @@ export function mergeWithNext(board: Storyboard, sceneId: string, now = Date.now
     origin: 'merged',
     promptOverride: undefined,
     updatedAt: now,
+    // nenhuma imagem se perde ao unir; a oficial precisa ser aprovada de novo
+    images: [...(a.images ?? []), ...(b.images ?? [])],
+    officialImageId: a.officialImageId ?? b.officialImageId ?? null,
+    imageApprovedAt: null,
   }
   const scenes = [...board.scenes]
   scenes.splice(index, 2, merged)

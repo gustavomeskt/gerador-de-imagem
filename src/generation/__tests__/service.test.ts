@@ -65,7 +65,9 @@ describe('runGeneration', () => {
     })
 
     expect(results.map((r) => r.ok)).toEqual([true, false, true])
-    expect(results[1]).toEqual({ ok: false, error: 'limite de requisições' })
+    expect(results[1]).toMatchObject({ ok: false, error: 'limite de requisições' })
+    // o erro original vai junto (a fila do lote decide se pode repetir)
+    expect((results[1] as { cause?: Error }).cause?.message).toBe('limite de requisições')
   })
 
   it('marca como "Sem resposta" quando a API devolve menos imagens', async () => {

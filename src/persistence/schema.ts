@@ -1,5 +1,6 @@
 import type { DBSchema } from 'idb'
 import type { Edge } from '@xyflow/react'
+import type { SceneImageVersion } from '../batch/types'
 
 // Esquema do banco local (IndexedDB). Fica tudo no navegador: é um
 // armazenamento LOCAL, não um backup — o navegador pode apagar os dados se
@@ -44,7 +45,8 @@ export interface ProjectRecord {
 
 // Tipos de arquivo guardados. Só 'generated' é usado nesta etapa; os outros
 // já ficam reservados pras bibliotecas de referências e personagens.
-export type AssetKind = 'generated' | 'reference' | 'character'
+// 'scene' = imagem gerada para uma cena do storyboard (Etapa 6).
+export type AssetKind = 'generated' | 'reference' | 'character' | 'scene'
 
 // De onde veio uma imagem gerada — vai pro manifest.json da exportação.
 export interface AssetSource {
@@ -98,6 +100,9 @@ export interface AssetRecord {
   // referências: hash do conteúdo (evita guardar a mesma foto duas vezes)
   sha256?: string
   reference?: AssetReferenceInfo
+  // imagem de cena: a versão completa (cena, tarefa, prompt, referências) —
+  // permite recuperar a imagem mesmo que o storyboard não tenha sido salvo
+  sceneImage?: SceneImageVersion
 }
 
 // Registro genérico das bibliotecas futuras (personagens, storyboards, cenas,

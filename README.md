@@ -127,6 +127,7 @@ Rotas (todas em `/api`, repassadas pelo Vite em desenvolvimento):
 | `POST /api/images/generate` | gera imagens — exige o cabeçalho `X-Cost-Quote`; com `references` usa o endpoint de edição da OpenAI com as fotos |
 | `POST /api/prompts/quote` | orçamento do "Melhorar prompt" |
 | `POST /api/prompts/enhance` | melhora o prompt — exige `X-Cost-Quote` |
+| `POST /api/images/batch-quote` | orçamento do lote do storyboard: uma imagem por cena, cada uma com o próprio prompt e fotos |
 | `POST /api/story/quote` | orçamento da interpretação de uma historinha |
 | `POST /api/story/interpret` | interpreta a copy (modelo de linguagem ou simulado) — exige `X-Cost-Quote` |
 
@@ -405,10 +406,106 @@ Tudo (copy, cenas, ligações com a biblioteca, prompts, aprovações, versões
 anteriores e histórico) fica salvo no IndexedDB (tabela `storyboards`, um por
 projeto) e volta depois de recarregar. Apagar o projeto apaga a historinha.
 
-Limitações desta etapa: a interpretação real (modelo de linguagem) ainda não
-foi testada com a API de verdade — só com respostas simuladas; a geração em
-lote das cenas fica para a próxima etapa; o ZIP do projeto ainda não inclui
-o storyboard.
+Limitação: a interpretação real (modelo de linguagem) ainda não foi testada
+com a API de verdade — só com respostas simuladas.
+
+## Imagens do storyboard (geração em lote)
+
+Aba **Imagens** da Historinha. Fluxo: cadastrar os personagens → colar a copy
+→ interpretar → revisar e **aprovar** o storyboard → **Gerar todas as
+imagens**.
+
+**Antes de gerar**, o diálogo mostra:
+
+- quantas imagens serão geradas (uma por cena, cada uma com o próprio prompt);
+- o que gerar: todas as cenas aprovadas, só as que ainda não têm imagem ou só
+  as escolhidas;
+- se o storyboard está aprovado; cenas não aprovadas ficam de fora;
+- personagens ambíguos (bloqueiam a cena até confirmar), personagens sem
+  cadastro (vão sem foto), fotos ausentes, personagem excluído, cenas com mais
+  personagens do que o limite de fotos (ficam de fora para revisão — nada é
+  descartado em silêncio) e cenas com alertas;
+- modelo (GPT Image 1.5, 1 ou 1 Mini — os que aceitam fotos), qualidade,
+  fidelidade às fotos, quantas imagens ao mesmo tempo e o modo de
+  continuidade;
+- com o provedor **Simulado**: aviso de que as imagens são **fictícias** (sem
+  IA, sem custo). Com o **Backend**: o servidor calcula o custo do lote
+  inteiro e a confirmação é obrigatória antes de qualquer cobrança.
+
+**Cada cena gera a sua imagem**, com o mesmo montador de prompt da
+pré-visualização: ação da cena, trecho da copy (só como referência, sem
+escrever na imagem), fotos e fichas dos personagens daquela cena, figurino,
+ambiente, objetos, expressões, enquadramento/câmera, guia de estilo, 9:16 e
+sem texto.
+
+**Continuidade entre cenas:**
+
+- *Memória visual* em todos os prompts: roupa de cada personagem desde a cena
+  em que foi descrita, cenários que já apareceram (mesmo layout, móveis,
+  cores, luz) e objetos importantes já mostrados.
+- *Imagens de outras cenas* como referência extra (opcional): só imagens já
+  **aprovadas** (padrão), ou **encadeado** — a cena espera a cena anterior do
+  mesmo ambiente/personagem ser gerada e usa o resultado (sequencial). A
+  imagem de outra cena é marcada no prompt como "só continuidade" (roupa,
+  cenário, objetos), nunca como fonte de identidade. Fotos dos personagens
+  têm prioridade; a imagem extra só entra se couber no limite. Imagem
+  simulada nunca serve de continuidade para imagem real.
+
+**Fila:** limite de chamadas simultâneas, progresso geral e por cena, estados
+pendente / gerando / concluída / falhou / cancelada / aprovada. Falhas em que
+é **certo** que nada foi cobrado (limite de requisições, servidor ocupado,
+recusa) são repetidas sozinhas até 3 vezes, com espera crescente (respeita o
+`Retry-After` e segura a fila toda). Falhas **incertas** (tempo esgotado,
+conexão caída no meio) **não** são repetidas com provedor pago — a pessoa
+decide. Botões: **Pausar** (as que já estão gerando terminam),
+**Retomar**, **Cancelar pendentes** e **Gerar de novo as com falha**.
+
+**Salvamento e recuperação:** cada imagem vai para o IndexedDB assim que
+chega (com a versão completa: cena, tarefa, prompt, referências). Cada tarefa
+tem um id e um token por tentativa — resposta atrasada de outra tentativa é
+descartada, nunca vai para a cena errada. Ao reabrir o app: as concluídas
+continuam, o lote fica **pausado** (nada recomeça sozinho), imagens que
+chegaram a ser salvas são recuperadas e as que estavam no meio ficam como
+"interrompidas" (com aviso de possível cobrança no modo real). Retomar com o
+backend pede **novo orçamento e confirmação** das pendentes.
+
+**Regenerar e versões:** cada cena tem **Regenerar** (só aquela imagem, com os
+mesmos personagens e referências). Todas as versões ficam guardadas; dá para
+comparar com a oficial e escolher a oficial. Uma versão nova nunca substitui
+uma imagem **aprovada** sem a pessoa escolher. Cena editada depois da geração
+mostra "cena editada depois desta imagem".
+
+**Formato:** geração em 1024×1536 (vertical **2:3**, nativo do modelo) **sem
+recorte** — nenhum rosto, mão ou objeto é cortado às cegas. O alvo 9:16
+(1080×1920) exige reenquadramento ou expansão, que fica para a próxima etapa
+(com conferência). As instruções já pedem a ação na área central vertical.
+
+**Exportar para o Google Flow (ZIP)** — além do que o ZIP do projeto já tinha:
+
+```
+storyboard/
+├── LEIA-ME.txt
+├── cenas/cena_001.png …      ← imagem OFICIAL de cada cena, na ordem da história
+├── prompts/cena_001.txt …    ← texto exato enviado para cada imagem oficial
+├── roteiro_google_flow.md    ← por cena: imagem, personagens, câmera, MOVIMENTO e trecho da copy
+├── copy_original.txt         ← a copy exatamente como foi colada
+└── storyboard.json           ← storyboard completo (cenas, personagens, histórico, versões)
+```
+
+O `manifest.json` ganha a seção `storyboard` (por cena: id, título, imagem,
+modelo, dimensões, hash, referências usadas, personagens com a versão da
+ficha, aprovada ou não, simulada ou não) e os personagens indicam as cenas em
+que aparecem. **A ferramenta ainda não anima as imagens** — o roteiro traz a
+orientação de movimento para usar no Google Flow. Imagens simuladas saem como
+`.svg` e marcadas como fictícias.
+
+Servidor: `MAX_IMAGES_PER_BATCH`, `MAX_COST_PER_BATCH_USD` (lote inteiro),
+`MAX_COST_PER_JOB_USD` (cada cena), limites diários e
+`BATCH_QUOTE_TTL_SECONDS`. Cada chamada do lote precisa bater com uma cena do
+orçamento confirmado (prompt, modelo, tamanho, qualidade, fidelidade e fotos
+pelo hash); mudar qualquer coisa invalida a autorização. Uma cena recusada
+pela OpenAI (sem cobrança) volta ao orçamento para nova tentativa; em tempo
+esgotado, não.
 
 ## Armazenamento e exportação
 
@@ -423,7 +520,8 @@ navegador, no IndexedDB (`src/persistence/`):
 - Apagar uma imagem, um nó ou um fluxo apaga os arquivos correspondentes.
 - A biblioteca de personagens usa a tabela `characters`; as fotos dela ficam
   na tabela de arquivos como parte da biblioteca (não de um projeto). A
-  historinha (copy + storyboard) usa a tabela `storyboards`. Tabelas
+  historinha (copy + storyboard + fila de geração) usa a tabela `storyboards`;
+  as imagens das cenas ficam na tabela de arquivos (tipo `scene`). Tabelas
   reservadas para as próximas etapas: cenas, prompts e versões de imagem.
 - Fluxos da versão anterior (que ficavam no `localStorage`) são copiados para
   o banco na primeira abertura. A cópia antiga **não é apagada**.

@@ -6,8 +6,19 @@ import { useStoryStore } from '../../store/useStoryStore'
 import { buildScenePrompt } from '../../story/scenePrompt'
 import { SCENE_STATUS_LABELS, type Storyboard, type StoryScene } from '../../story/types'
 import { CommitField } from './fields'
+import { SceneImagePanel } from './SceneImage'
 
-export default function SceneEditor({ board, scene, index }: { board: Storyboard; scene: StoryScene; index: number }) {
+export default function SceneEditor({
+  board,
+  scene,
+  index,
+  onMessage,
+}: {
+  board: Storyboard
+  scene: StoryScene
+  index: number
+  onMessage: (text: string, error?: boolean) => void
+}) {
   const projectId = board.projectId
   const library = useCharacterStore((s) => s.characters)
   const style = useFlowStore((s) => s.flowsData[projectId]?.styleGuide)
@@ -81,6 +92,8 @@ export default function SceneEditor({ board, scene, index }: { board: Storyboard
           <ArrowDown size={14} />
         </button>
       </div>
+
+      <SceneImagePanel board={board} scene={scene} number={index + 1} onMessage={onMessage} />
 
       <div className="ifs-scene-editor__excerpt">
         <span>Trecho exato da copy (posição {scene.source.start}–{scene.source.end}, não editável)</span>

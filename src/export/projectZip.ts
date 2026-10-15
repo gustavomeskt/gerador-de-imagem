@@ -4,12 +4,16 @@ import type { AssetRecord, AssetSource } from '../persistence/schema'
 import type { FlowMeta, FlowSlice, ImageFlowNode, ReferenceFlowNode } from '../store/types'
 import { sheetOf, type Character } from '../generation/characters'
 import type { StyleGuide } from '../generation/styleGuide'
+import type { SceneImageVersion } from '../batch/types'
+import type { Storyboard } from '../story/types'
+import { isOutdated } from '../batch/versions'
 
 // Exportação do projeto em ZIP: todas as imagens prontas, em ordem, com nomes
 // padronizados, e um manifest.json descrevendo cada arquivo (origem, prompt,
 // modelo, dimensões e hash SHA-256 pra conferir a integridade).
 
-export const MANIFEST_FORMAT_VERSION = 1
+// 2: + storyboard (cenas, imagens oficiais, prompts, orientação de movimento)
+export const MANIFEST_FORMAT_VERSION = 2
 export const IMAGES_DIR = 'imagens'
 
 export const ORDERING_RULE =
@@ -80,6 +84,56 @@ export interface ManifestCharacter {
   missing: string[]
   deletedFromLibrary: boolean
   usedInNodes: string[]
+  usedInScenes: number[] // números das cenas do storyboard
+}
+
+export interface ManifestSceneImage {
+  versionId: string
+  file: string
+  promptFile: string
+  mimeType: string
+  width: number | null
+  height: number | null
+  byteLength: number
+  sha256: string
+  model: string
+  size: string
+  quality: string
+  simulated: boolean
+  approved: boolean
+  outdated: boolean // a cena foi editada depois da geração
+  createdAt: string
+  references: Array<{ kind: string; label: string; sha256: string | null; characterId?: string; sceneId?: string }>
+  characters: Array<{ characterId: string; name: string; version: number }>
+  format: SceneImageVersion['format']
+}
+
+export interface ManifestScene {
+  number: number
+  sceneId: string
+  title: string
+  status: string
+  excerpt: string
+  source: { start: number; end: number }
+  characters: string[]
+  motion: string
+  image: ManifestSceneImage | null
+  versionsAvailable: number
+  missing?: string
+}
+
+export interface ManifestStoryboard {
+  folder: string
+  copyFile: string
+  copySha256: string
+  storyboardFile: string
+  guideFile: string
+  approvedAt: string | null
+  sceneCount: number
+  imagesExported: number
+  simulatedImages: number
+  animationNote: string
+  scenes: ManifestScene[]
 }
 
 export interface ProjectManifest {
@@ -96,6 +150,7 @@ export interface ProjectManifest {
   referenceNodes: ManifestReferenceNode[]
   characters: ManifestCharacter[]
   styleGuide: StyleGuide | null
+  storyboard: ManifestStoryboard | null
 }
 
 export type AssetLoader = (assetId: string) => Promise<AssetRecord | undefined>
@@ -174,6 +229,7 @@ export async function buildProjectZip(params: {
   loadAsset: AssetLoader
   // biblioteca atual (pra incluir fotos e fichas dos personagens usados)
   characters?: Character[]
+  storyboard?: Storyboard | null
   now?: Date
 }): Promise<ProjectZip> {
   const { meta, slice, loadAsset } = params
@@ -282,11 +338,20 @@ export async function buildProjectZip(params: {
   for (const node of nodes) {
     for (const id of node.data.castIds ?? []) usage.set(id, [...(usage.get(id) ?? []), node.id])
   }
+  const sceneUsage = new Map<string, number[]>()
+  params.storyboard?.scenes.forEach((scene, i) => {
+    for (const key of scene.characterKeys) {
+      const libraryId = params.storyboard!.characters.find((c) => c.key === key)?.libraryId
+      if (libraryId) sceneUsage.set(libraryId, [...(sceneUsage.get(libraryId) ?? []), i + 1])
+    }
+  })
+  for (const id of sceneUsage.keys()) if (!usage.has(id)) usage.set(id, [])
   const characters: ManifestCharacter[] = []
   for (const [id, usedInNodes] of usage) {
+    const usedInScenes = sceneUsage.get(id) ?? []
     const c = params.characters?.find((x) => x.id === id)
     if (!c) {
-      characters.push({ id, name: null, version: null, sheet: null, primaryPhotoId: null, files: [], missing: [], deletedFromLibrary: true, usedInNodes })
+      characters.push({ id, name: null, version: null, sheet: null, primaryPhotoId: null, files: [], missing: [], deletedFromLibrary: true, usedInNodes, usedInScenes })
       continue
     }
     const folder = `personagens/${slugify(c.name)}_${id.slice(-6)}`
@@ -307,8 +372,11 @@ export async function buildProjectZip(params: {
       missing,
       deletedFromLibrary: false,
       usedInNodes,
+      usedInScenes,
     })
   }
+
+  const storyboard = params.storyboard ? await addStoryboard(zip, params.storyboard, loadAsset) : null
 
   const manifest: ProjectManifest = {
     formatVersion: MANIFEST_FORMAT_VERSION,
@@ -328,9 +396,167 @@ export async function buildProjectZip(params: {
     referenceNodes,
     characters,
     styleGuide: slice.styleGuide ?? null,
+    storyboard,
   }
 
   zip.file('manifest.json', JSON.stringify(manifest, null, 2))
   const data = await zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' })
   return { data, manifest, fileName: zipFileName(meta.name, now) }
+}
+
+// --- storyboard: pacote para o Google Flow ---
+
+export const STORYBOARD_DIR = 'storyboard'
+
+export const ANIMATION_NOTE =
+  'Esta ferramenta ainda NÃO anima as imagens. Cada cena traz a imagem oficial e uma orientação de movimento ' +
+  '(só a ação já descrita na copy) para você usar ao animar no Google Flow.'
+
+export function sceneFileName(number: number, mimeType: string): string {
+  return `${STORYBOARD_DIR}/cenas/cena_${pad(number, 3)}.${extensionFor(mimeType)}`
+}
+
+function sceneTitle(excerpt: string): string {
+  const text = excerpt.replace(/\s+/g, ' ').trim()
+  return text.length > 70 ? `${text.slice(0, 69)}…` : text
+}
+
+async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoader): Promise<ManifestStoryboard> {
+  const nameOf = new Map(board.characters.map((c) => [c.key, c.name]))
+  const scenes: ManifestScene[] = []
+  const guide: string[] = [
+    '# Roteiro para o Google Flow',
+    '',
+    ANIMATION_NOTE,
+    '',
+    'Cada cena: arquivo da imagem oficial, trecho da copy (texto original) e orientação de movimento.',
+    '',
+  ]
+  let exported = 0
+  let simulated = 0
+
+  for (const [i, scene] of board.scenes.entries()) {
+    const number = i + 1
+    const title = sceneTitle(scene.excerpt)
+    const characters = scene.characterKeys.map((k) => nameOf.get(k) ?? '?')
+    const official = scene.images?.find((v) => v.id === scene.officialImageId)
+    let image: ManifestSceneImage | null = null
+    let missing: string | undefined
+    if (!official) missing = 'sem imagem oficial'
+    else {
+      let bytes: Uint8Array | undefined
+      if (official.assetId) {
+        const asset = await loadAsset(official.assetId)
+        if (asset) bytes = new Uint8Array(asset.bytes)
+      }
+      if (!bytes && official.src?.startsWith('data:')) bytes = dataUrlToBytes(official.src).bytes
+      if (!bytes) missing = 'arquivo da imagem não encontrado no armazenamento local'
+      else {
+        const file = sceneFileName(number, official.mimeType)
+        const promptFile = `${STORYBOARD_DIR}/prompts/cena_${pad(number, 3)}.txt`
+        zip.file(file, bytes, { binary: true })
+        zip.file(promptFile, official.prompt)
+        exported += 1
+        if (official.simulated) simulated += 1
+        image = {
+          versionId: official.id,
+          file,
+          promptFile,
+          mimeType: official.mimeType,
+          width: official.width,
+          height: official.height,
+          byteLength: bytes.byteLength,
+          sha256: await sha256Hex(bytes),
+          model: official.model,
+          size: official.size,
+          quality: official.quality,
+          simulated: official.simulated,
+          approved: !!scene.imageApprovedAt,
+          outdated: isOutdated(scene, board),
+          createdAt: new Date(official.createdAt).toISOString(),
+          references: official.references.map((r) => ({
+            kind: r.kind,
+            label: r.label,
+            sha256: r.sha256 ?? null,
+            ...(r.characterId ? { characterId: r.characterId } : {}),
+            ...(r.sceneId ? { sceneId: r.sceneId } : {}),
+          })),
+          characters: official.characters.map((c) => ({ characterId: c.characterId, name: c.name, version: c.version })),
+          format: official.format,
+        }
+      }
+    }
+    scenes.push({
+      number,
+      sceneId: scene.id,
+      title,
+      status: scene.status,
+      excerpt: scene.excerpt,
+      source: scene.source,
+      characters,
+      motion: scene.motion,
+      image,
+      versionsAvailable: scene.images?.length ?? 0,
+      ...(missing ? { missing } : {}),
+    })
+
+    guide.push(`## Cena ${pad(number, 3)} — ${title}`)
+    guide.push('')
+    guide.push(`- Imagem: ${image ? image.file.replace(`${STORYBOARD_DIR}/`, '') : `(${missing})`}${image?.simulated ? ' — IMAGEM SIMULADA (fictícia)' : ''}${image && !image.approved ? ' — ainda não aprovada' : ''}`)
+    guide.push(`- Personagens: ${characters.join(', ') || '—'}`)
+    if (scene.environment) guide.push(`- Ambiente: ${scene.environment}`)
+    if (scene.camera || scene.framing) guide.push(`- Câmera: ${[scene.framing, scene.camera].filter(Boolean).join('; ')}`)
+    guide.push(`- Movimento (Google Flow): ${scene.motion || 'animar apenas a ação descrita no trecho'}`)
+    guide.push(`- Trecho da copy: "${scene.excerpt}"`)
+    guide.push('')
+  }
+
+  const copyFile = `${STORYBOARD_DIR}/copy_original.txt`
+  const storyboardFile = `${STORYBOARD_DIR}/storyboard.json`
+  const guideFile = `${STORYBOARD_DIR}/roteiro_google_flow.md`
+  zip.file(copyFile, board.copy)
+  // storyboard completo (sem imagens em memória e sem versões anteriores restauráveis)
+  const { snapshots: _snapshots, ...rest } = board
+  zip.file(
+    storyboardFile,
+    JSON.stringify(
+      { ...rest, scenes: board.scenes.map((s) => ({ ...s, images: s.images?.map(({ src: _src, ...v }) => v) })) },
+      null,
+      2,
+    ),
+  )
+  zip.file(guideFile, guide.join('\n'))
+  zip.file(
+    `${STORYBOARD_DIR}/LEIA-ME.txt`,
+    [
+      'Pacote do storyboard',
+      '',
+      ANIMATION_NOTE,
+      '',
+      'cenas/            imagens oficiais, na ordem da história (cena_001, cena_002, ...)',
+      'prompts/          o texto exato enviado para gerar cada imagem oficial',
+      'roteiro_google_flow.md   imagem + trecho da copy + orientação de movimento de cada cena',
+      'copy_original.txt        a copy exatamente como foi colada',
+      'storyboard.json          o storyboard completo (cenas, personagens, histórico, versões)',
+      '',
+      simulated ? `ATENÇÃO: ${simulated} imagem(ns) são SIMULADAS (fictícias, geradas sem IA) — servem só para testar o fluxo.` : '',
+      'Formato: as imagens estão no formato vertical nativo do modelo, sem recorte; o ajuste para 9:16 ainda não foi feito.',
+    ]
+      .filter((l) => l !== null)
+      .join('\n'),
+  )
+
+  return {
+    folder: STORYBOARD_DIR,
+    copyFile,
+    copySha256: await sha256Hex(new TextEncoder().encode(board.copy)),
+    storyboardFile,
+    guideFile,
+    approvedAt: board.approvedAt ? new Date(board.approvedAt).toISOString() : null,
+    sceneCount: board.scenes.length,
+    imagesExported: exported,
+    simulatedImages: simulated,
+    animationNote: ANIMATION_NOTE,
+    scenes,
+  }
 }

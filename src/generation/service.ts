@@ -13,7 +13,8 @@ export interface ImageGenerationConfig {
   quality?: string
 }
 
-export type ImageResult = { ok: true; image: GeneratedImage } | { ok: false; error: string }
+// cause: o erro original (permite à fila decidir se é seguro tentar de novo)
+export type ImageResult = { ok: true; image: GeneratedImage } | { ok: false; error: string; cause?: unknown }
 
 export type CropFn = (src: string, targetAspect: number) => Promise<string>
 
@@ -28,6 +29,8 @@ export interface RunGenerationParams {
   // fotos de referência (vão em todas as chamadas do trabalho)
   references?: ReferenceImageInput[]
   inputFidelity?: InputFidelity
+  // lote do storyboard: quantas das últimas referências são de cenas anteriores
+  deferredReferences?: number
 }
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -40,7 +43,7 @@ export function resolveAspect(config: ImageGenerationConfig): number {
 }
 
 export async function runGeneration(params: RunGenerationParams): Promise<ImageResult[]> {
-  const { provider, config, prompt, count, crop, quoteId, references, inputFidelity } = params
+  const { provider, config, prompt, count, crop, quoteId, references, inputFidelity, deferredReferences } = params
   const sizeOption = getSizeOption(config.model, config.size)
   const batches = splitIntoBatches(count, MODEL_MAX_N[config.model])
 
@@ -53,7 +56,9 @@ export async function runGeneration(params: RunGenerationParams): Promise<ImageR
           size: config.size,
           quality: config.quality,
           n,
-          ...(references?.length ? { references, ...(inputFidelity ? { inputFidelity } : {}) } : {}),
+          ...(references?.length
+            ? { references, ...(inputFidelity ? { inputFidelity } : {}), ...(deferredReferences ? { deferredReferences } : {}) }
+            : {}),
         },
         quoteId ? { quoteId } : undefined,
       ),
@@ -65,7 +70,7 @@ export async function runGeneration(params: RunGenerationParams): Promise<ImageR
     const expected = batches[batchIndex]
     if (outcome.status === 'rejected') {
       const error = errorMessage(outcome.reason, 'Falha ao gerar imagens')
-      for (let i = 0; i < expected; i++) results.push({ ok: false, error })
+      for (let i = 0; i < expected; i++) results.push({ ok: false, error, cause: outcome.reason })
       return
     }
     const images = outcome.value.slice(0, expected)

@@ -6,12 +6,12 @@ import { publicConfig, type ServerConfig } from './config'
 import { HttpError, readJsonBody, sendError, sendJson } from './http'
 import { ConcurrencyLimiter, RateLimiter, UsageLedger, type Reservation } from './limits'
 import { createOpenAIClient, redactSecrets, type ImageClient } from './openaiClient'
-import { estimateEnhance, estimateImageJob, estimateStory, loadPriceTable, PRICES_REFERENCE_DATE, PRICES_SOURCE, type PriceTable } from './pricing'
+import { estimateBatch, estimateEnhance, estimateImageJob, estimateStory, loadPriceTable, PRICES_REFERENCE_DATE, PRICES_SOURCE, type PriceTable } from './pricing'
 import { fingerprint, QuoteStore, type QuoteRecord } from './quotes'
 import { checkRequestOrigin } from './security'
 import { createSimulatedClient } from './simulatedClient'
 import { interpretStoryChunks, storyChunks } from './story'
-import { validateEnhanceBody, validateGenerateBody, validateImageJob, validateStoryBody } from './validation'
+import { validateBatchJob, validateEnhanceBody, validateGenerateBody, validateImageJob, validateStoryBody } from './validation'
 import { SIMULATED_MODEL } from '../src/story/simulatedInterpreter'
 
 // Rotas do backend:
@@ -19,6 +19,7 @@ import { SIMULATED_MODEL } from '../src/story/simulatedInterpreter'
 //   GET  /api/status            → modo, se a chave existe (nunca a chave), limites e uso do dia
 //   POST /api/images/quote      → orçamento de um trabalho (todas as imagens de um nó)
 //   POST /api/images/generate   → contrato do backendProvider.ts + cabeçalho X-Cost-Quote
+//   POST /api/images/batch-quote → orçamento do lote do storyboard (1 imagem por cena)
 //   POST /api/prompts/quote     → orçamento do melhorador de prompt
 //   POST /api/prompts/enhance   → contrato do backendProvider.ts + cabeçalho X-Cost-Quote
 //   POST /api/story/quote       → orçamento da interpretação de uma historinha
@@ -90,22 +91,30 @@ function toQuoteResponse(q: QuoteRecord, deps: AppDeps, breakdown: string[], not
 
 // O orçamento vale só para exatamente este pedido — inclusive as mesmas
 // referências (pelo hash dos bytes), na mesma ordem, e a mesma fidelidade.
-function imageFingerprint(p: {
+// Lote: as últimas `deferredReferences` referências são imagens de cenas
+// anteriores do próprio lote (ainda não existiam no orçamento) — entra a
+// QUANTIDADE delas, não o conteúdo.
+export function imageFingerprint(p: {
   model: string
   prompt: string
   size: string
   quality?: string
   references?: ReferenceDescriptor[]
   inputFidelity?: string
+  deferredReferences?: number
 }) {
+  const deferred = p.deferredReferences ?? 0
+  const refs = p.references ?? []
+  const known = deferred ? refs.slice(0, refs.length - deferred) : refs
   return fingerprint({
     kind: 'images',
     model: p.model,
     prompt: p.prompt,
     size: p.size,
     quality: p.quality,
-    references: (p.references ?? []).map((r) => [r.sha256, r.mimeType, r.byteLength, r.width, r.height]),
-    inputFidelity: p.inputFidelity,
+    references: known.map((r) => [r.sha256, r.mimeType, r.byteLength, r.width, r.height]),
+    inputFidelity: refs.length || deferred ? p.inputFidelity : undefined,
+    ...(deferred ? { deferredReferences: deferred } : {}),
   })
 }
 
@@ -122,16 +131,25 @@ function quoteIdFrom(req: IncomingMessage): string | undefined {
 // Executa a chamada (paga, no modo openai) dentro dos limites: reserva no
 // livro-caixa, respeita a fila de concorrência e devolve a reserva se a
 // OpenAI recusar. Em timeout a reserva fica (a OpenAI pode ter cobrado).
-async function runPaid<T>(deps: AppDeps, images: number, usd: number, task: () => Promise<T>): Promise<T> {
+// onRefused: a chamada foi recusada sem cobrança (pode ser repetida).
+async function runPaid<T>(deps: AppDeps, images: number, usd: number, task: () => Promise<T>, onRefused?: () => void): Promise<T> {
   const paid = deps.config.mode === 'openai'
   let reservation: Reservation | null = null
   if (paid) reservation = deps.ledger.reserve(images, usd)
   try {
     return await deps.limiter.run(task)
   } catch (err) {
-    if (reservation && !(err instanceof HttpError && err.code === 'upstream_timeout')) deps.ledger.refund(reservation)
+    const timedOut = err instanceof HttpError && err.code === 'upstream_timeout'
+    if (reservation && !timedOut) deps.ledger.refund(reservation)
+    if (!timedOut && isRefusal(err)) onRefused?.()
     throw err
   }
+}
+
+// Erros em que, com certeza, nada foi gerado nem cobrado: o pedido nem
+// chegou à OpenAI (fila cheia) ou ela recusou antes de gerar.
+function isRefusal(err: unknown): boolean {
+  return err instanceof HttpError && ['server_busy', 'upstream_rate_limited', 'upstream_rejected', 'upstream_auth'].includes(err.code)
 }
 
 async function route(req: IncomingMessage, res: ServerResponse, deps: AppDeps) {
@@ -188,15 +206,56 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: AppDeps) {
       // limite maior: as fotos de referência vêm no corpo (base64)
       const request = validateGenerateBody(await readJsonBody(req, config.maxEditBodyBytes), config)
       deps.rateLimiter.check()
-      const usd = deps.quotes.consume(quoteIdFrom(req), {
-        kind: 'images',
-        fingerprint: imageFingerprint(request),
-        images: request.n,
-      })
-      const images = await runPaid(deps, request.n, usd, () =>
-        request.references ? deps.client.editImages(request) : deps.client.generateImages(request),
+      const quoteId = quoteIdFrom(req)
+      const fp = imageFingerprint(request)
+      const usd = deps.quotes.consume(quoteId, { kind: 'images', fingerprint: fp, images: request.n })
+      const images = await runPaid(
+        deps,
+        request.n,
+        usd,
+        () => (request.references ? deps.client.editImages(request) : deps.client.generateImages(request)),
+        () => deps.quotes.release(quoteId, fp),
       )
       return sendJson(res, 200, { images })
+    }
+
+    case '/api/images/batch-quote': {
+      allow('POST')
+      const job = validateBatchJob(await readJsonBody(req, config.maxBatchBodyBytes), config)
+      const estimate = estimateBatch(job, deps.prices)
+      if (config.mode === 'openai') {
+        const worst = Math.max(...estimate.perItem)
+        if (worst > config.maxCostPerJobUsd) {
+          throw new HttpError(
+            422,
+            'job_too_expensive',
+            `Uma das cenas custaria US$ ${worst.toFixed(2)}, acima do limite por geração (US$ ${config.maxCostPerJobUsd.toFixed(2)}).`,
+          )
+        }
+        if (estimate.usd > config.maxCostPerBatchUsd) {
+          throw new HttpError(
+            422,
+            'batch_too_expensive',
+            `Custo estimado do lote (US$ ${estimate.usd.toFixed(2)}) acima do limite por lote (US$ ${config.maxCostPerBatchUsd.toFixed(2)}). Gere menos cenas por vez ou ajuste MAX_COST_PER_BATCH_USD.`,
+          )
+        }
+        deps.ledger.assertWithinLimits(job.items.length, estimate.usd)
+      }
+      const quote = deps.quotes.create({
+        kind: 'batch',
+        fingerprint: fingerprint({ kind: 'batch', items: job.items.length }),
+        images: job.items.length,
+        calls: job.items.length,
+        usd: estimate.usd,
+        ttlMs: config.batchQuoteTtlMs,
+        // as cenas anteriores entram como "lugares" no fim da lista de
+        // referências (imageFingerprint só considera a quantidade delas)
+        items: job.items.map((item, i) => ({
+          fingerprint: imageFingerprint({ model: job.model, size: job.size, quality: job.quality, inputFidelity: job.inputFidelity, ...item, references: [...(item.references ?? []), ...Array.from({ length: item.deferredReferences ?? 0 }, () => item.references![0])] }),
+          usd: estimate.perItem[i],
+        })),
+      })
+      return sendJson(res, 200, toQuoteResponse(quote, deps, estimate.breakdown, estimate.notes))
     }
 
     case '/api/prompts/quote': {

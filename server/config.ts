@@ -32,6 +32,11 @@ export interface ServerConfig {
   maxRequestsPerMinute: number
   maxImagesPerJob: number
   maxCostPerJobUsd: number
+  // lote do storyboard (uma imagem por cena)
+  maxImagesPerBatch: number
+  maxCostPerBatchUsd: number
+  maxBatchBodyBytes: number
+  batchQuoteTtlMs: number
   dailyImageLimit: number
   dailyBudgetUsd: number
   quoteTtlMs: number
@@ -150,6 +155,10 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     maxRequestsPerMinute: readNumber(env, 'MAX_REQUESTS_PER_MINUTE', 20, { min: 1, max: 1000 }),
     maxImagesPerJob: readNumber(env, 'MAX_IMAGES_PER_JOB', 10, { min: 1, max: 100 }),
     maxCostPerJobUsd: readNumber(env, 'MAX_COST_PER_JOB_USD', 2, { min: 0, max: 1000 }),
+    maxImagesPerBatch: readNumber(env, 'MAX_IMAGES_PER_BATCH', 100, { min: 1, max: 1000 }),
+    maxCostPerBatchUsd: readNumber(env, 'MAX_COST_PER_BATCH_USD', 10, { min: 0, max: 10_000 }),
+    maxBatchBodyBytes: readNumber(env, 'MAX_BATCH_BODY_BYTES', 4 * 1024 * 1024, { min: 1024, max: 100 * 1024 * 1024 }),
+    batchQuoteTtlMs: readNumber(env, 'BATCH_QUOTE_TTL_SECONDS', 3600, { min: 60, max: 86_400 }) * 1000,
     dailyImageLimit: readNumber(env, 'DAILY_IMAGE_LIMIT', 50, { min: 0, max: 100_000 }),
     dailyBudgetUsd: readNumber(env, 'DAILY_BUDGET_USD', 5, { min: 0, max: 100_000 }),
     quoteTtlMs: readNumber(env, 'QUOTE_TTL_SECONDS', 600, { min: 10, max: 86_400 }) * 1000,
@@ -178,6 +187,8 @@ export function publicConfig(config: ServerConfig) {
       maxRequestsPerMinute: config.maxRequestsPerMinute,
       maxImagesPerJob: config.maxImagesPerJob,
       maxCostPerJobUsd: config.maxCostPerJobUsd,
+      maxImagesPerBatch: config.maxImagesPerBatch,
+      maxCostPerBatchUsd: config.maxCostPerBatchUsd,
       dailyImageLimit: config.dailyImageLimit,
       dailyBudgetUsd: config.dailyBudgetUsd,
       quoteTtlSeconds: config.quoteTtlMs / 1000,

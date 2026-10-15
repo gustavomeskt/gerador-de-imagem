@@ -1,3 +1,5 @@
+import type { BatchRun, SceneImageVersion } from '../batch/types'
+
 // Tipos do storyboard de uma historinha.
 //
 // Regra principal: a COPY ORIGINAL NUNCA É ALTERADA. Cada cena aponta para o
@@ -59,6 +61,10 @@ export interface StoryScene {
   promptOverride?: string // prompt editado manualmente
   origin: 'interpreted' | 'manual' | 'split' | 'merged'
   updatedAt: number
+  // imagens geradas (todas as versões ficam guardadas)
+  images?: SceneImageVersion[]
+  officialImageId?: string | null // versão escolhida como oficial
+  imageApprovedAt?: number | null // a pessoa aprovou a imagem oficial
 }
 
 export interface StoryHistoryEntry {
@@ -84,6 +90,7 @@ export interface Storyboard {
   approvedAt: number | null // storyboard completo aprovado
   history: StoryHistoryEntry[] // registro de revisões e aprovações
   snapshots: StorySnapshot[] // versões anteriores restauráveis
+  batch?: BatchRun | null // último lote de geração (fila, progresso)
   createdAt: number
   updatedAt: number
 }

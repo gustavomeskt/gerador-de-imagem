@@ -1,6 +1,7 @@
 import { repository } from '../persistence/repository'
 import { useCharacterStore } from '../store/useCharacterStore'
 import { useFlowStore } from '../store/useFlowStore'
+import { useStoryStore } from '../store/useStoryStore'
 import type { ProjectManifest } from './projectZip'
 
 // Gera o ZIP do projeto a partir do estado atual e dispara o download.
@@ -18,6 +19,7 @@ export async function exportProjectZip(flowId: string): Promise<ProjectManifest>
     slice,
     loadAsset: (id) => (persistent ? repository.getAsset(id) : Promise.resolve(undefined)),
     characters: useCharacterStore.getState().characters,
+    storyboard: useStoryStore.getState().boards[flowId] ?? null,
   })
 
   const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'application/zip' }))

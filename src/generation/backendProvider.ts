@@ -1,5 +1,6 @@
 import {
   ProviderError,
+  type BatchImageJob,
   type CallOptions,
   type CostQuote,
   type GeneratedImage,
@@ -22,6 +23,9 @@ import { toDescriptor } from './references'
 //                              + cabeçalho X-Cost-Quote
 //     (com references o servidor usa o endpoint de edição da OpenAI, com as fotos)
 //     → 200 { images: [{ b64: string, mimeType?: string }] }
+//   POST /api/images/batch-quote { model, size, quality?, inputFidelity?,
+//                                items: [{ prompt, references?, deferredReferences? }] } → CostQuote
+//     (lote do storyboard: cada /images/generate precisa bater com um item)
 //   POST /api/prompts/quote    { prompt } → CostQuote
 //   POST /api/prompts/enhance  { prompt }  + cabeçalho X-Cost-Quote
 //     → 200 { prompt: string }
@@ -51,14 +55,18 @@ export interface BackendStatus {
   prices: { referenceDate: string; source: string }
 }
 
-async function readErrorMessage(res: Response, fallback: string): Promise<string> {
+async function readError(res: Response, fallback: string): Promise<ProviderError> {
+  let message = fallback
+  let code: string | undefined
   try {
     const body = await res.json()
-    const message = body?.error?.message
-    return typeof message === 'string' && message ? message : fallback
+    if (typeof body?.error?.message === 'string' && body.error.message) message = body.error.message
+    if (typeof body?.error?.code === 'string') code = body.error.code
   } catch {
-    return fallback
+    // corpo sem JSON
   }
+  const retry = Number(res.headers.get('retry-after'))
+  return new ProviderError(message, { status: res.status, code, ...(Number.isFinite(retry) && retry > 0 ? { retryAfterMs: retry * 1000 } : {}) })
 }
 
 function isQuote(value: unknown): value is CostQuote {
@@ -91,16 +99,12 @@ export function createBackendProvider(options: BackendProviderOptions = {}): Ima
         body: method === 'POST' ? JSON.stringify(body) : undefined,
       })
     } catch {
-      throw new ProviderError(BACKEND_UNAVAILABLE_MESSAGE)
+      throw new ProviderError(BACKEND_UNAVAILABLE_MESSAGE, { code: 'network_error' })
     }
 
     // 404/502/503/504 sem mensagem nossa: rota inexistente ou proxy sem servidor por trás
-    if ([404, 502, 503, 504].includes(res.status)) {
-      throw new ProviderError(await readErrorMessage(res, BACKEND_UNAVAILABLE_MESSAGE))
-    }
-    if (!res.ok) {
-      throw new ProviderError(await readErrorMessage(res, `Erro ${res.status} ${errorLabel}`))
-    }
+    if ([404, 502, 503, 504].includes(res.status)) throw await readError(res, BACKEND_UNAVAILABLE_MESSAGE)
+    if (!res.ok) throw await readError(res, `Erro ${res.status} ${errorLabel}`)
 
     try {
       return await res.json()
@@ -132,6 +136,21 @@ export function createBackendProvider(options: BackendProviderOptions = {}): Ima
       return quote('/images/quote', body, 'ao orçar a geração')
     },
 
+    quoteBatch(job: BatchImageJob) {
+      const body = {
+        model: job.model,
+        size: job.size,
+        quality: job.quality,
+        ...(job.inputFidelity ? { inputFidelity: job.inputFidelity } : {}),
+        items: job.items.map((item) => ({
+          prompt: item.prompt,
+          ...(item.references?.length ? { references: item.references.map(toDescriptor) } : {}),
+          ...(item.deferredReferences ? { deferredReferences: item.deferredReferences } : {}),
+        })),
+      }
+      return quote('/images/batch-quote', body, 'ao orçar o lote')
+    },
+
     quoteEnhance(prompt: string) {
       return quote('/prompts/quote', { prompt }, 'ao orçar o melhorador de prompt')
     },
@@ -147,6 +166,7 @@ export function createBackendProvider(options: BackendProviderOptions = {}): Ima
         n: req.n,
         ...(req.references?.length ? { references: req.references.map((r) => ({ mimeType: r.mimeType, b64: r.b64 })) } : {}),
         ...(req.references?.length && req.inputFidelity ? { inputFidelity: req.inputFidelity } : {}),
+        ...(req.references?.length && req.deferredReferences ? { deferredReferences: req.deferredReferences } : {}),
       }
       const data = (await request('POST', '/images/generate', body, 'ao gerar imagens', callOptions?.quoteId)) as {
         images?: Array<{ b64?: unknown; mimeType?: unknown }>

@@ -4,6 +4,8 @@ import { useStoryStore } from '../../store/useStoryStore'
 import { uncoveredPassages } from '../../story/interpretation'
 import { SCENE_STATUS_LABELS, type Storyboard, type StoryScene } from '../../story/types'
 import SceneEditor from './SceneEditor'
+import { IMAGE_STATE_LABELS, type SceneImageState } from '../../batch/types'
+import { sceneImageState } from '../../batch/versions'
 
 type Filter = 'all' | 'pending' | 'reviewed' | 'approved' | 'flagged'
 
@@ -18,12 +20,14 @@ const SceneCard = memo(function SceneCard({
   number,
   names,
   selected,
+  imageState,
   onSelect,
 }: {
   scene: StoryScene
   number: number
   names: string
   selected: boolean
+  imageState: SceneImageState
   onSelect: (id: string) => void
 }) {
   return (
@@ -52,13 +56,16 @@ const SceneCard = memo(function SceneCard({
         <small>
           {names || 'sem personagens'}
           {scene.environment && ` · ${scene.environment}`}
+          {imageState !== 'none' && (
+            <span className={`ifs-image-state ifs-image-state--${imageState}`}> imagem: {IMAGE_STATE_LABELS[imageState]}</span>
+          )}
         </small>
       </button>
     </li>
   )
 })
 
-export default function StoryboardTab({ board }: { board: Storyboard }) {
+export default function StoryboardTab({ board, onMessage }: { board: Storyboard; onMessage: (text: string, error?: boolean) => void }) {
   const projectId = board.projectId
   const approveAll = useStoryStore((s) => s.approveAll)
   const restoreSnapshot = useStoryStore((s) => s.restoreSnapshot)
@@ -181,6 +188,7 @@ export default function StoryboardTab({ board }: { board: Storyboard }) {
               number={index + 1}
               names={scene.characterKeys.map((k) => nameOf.get(k) ?? '?').join(', ')}
               selected={scene.id === selectedId}
+              imageState={sceneImageState(scene, board.batch)}
               onSelect={setSelectedId}
             />
           ))}
@@ -188,7 +196,7 @@ export default function StoryboardTab({ board }: { board: Storyboard }) {
         </ol>
         <div className="ifs-storyboard__editor">
           {selected ? (
-            <SceneEditor key={selected.id} board={board} scene={selected} index={selectedIndex} />
+            <SceneEditor key={selected.id} board={board} scene={selected} index={selectedIndex} onMessage={onMessage} />
           ) : (
             <p className="ifs-story-empty">Selecione uma cena para revisar, editar e aprovar.</p>
           )}

@@ -21,6 +21,7 @@ import {
   type ApplySummary,
   type ScenePatch,
 } from '../story/operations'
+import { recoverInterruptedRun } from '../batch/recovery'
 import { buildScenePrompt } from '../story/scenePrompt'
 import type { SceneStatus, Storyboard } from '../story/types'
 import { useCharacterStore } from './useCharacterStore'
@@ -69,6 +70,10 @@ interface StoryState {
   restoreSnapshot: (projectId: string, index: number) => void
   refreshPrompts: (projectId: string) => void
   dismissIssue: () => void
+  // alteração direta (usada pela geração em lote); prompts: recalcular os
+  // prompts das cenas (desnecessário para mudanças só de imagens/fila)
+  mutate: (projectId: string, change: (board: Storyboard) => Storyboard, options?: { prompts?: boolean }) => void
+  forget: (projectId: string) => void
 }
 
 // Quem interpreta: provedor "Simulado" → regras locais; "Backend" → servidor
@@ -127,14 +132,18 @@ function fromRecord(record: LibraryRecord): Storyboard | null {
 }
 
 let hydrating: Promise<void> | null = null
-// gravações em fila, uma por vez por projeto, sempre com a versão mais nova
+// gravações em fila, uma por vez por projeto, sempre com a versão mais nova;
+// várias mudanças seguidas viram uma gravação só
 const saveQueues = new Map<string, Promise<void>>()
+const saveScheduled = new Set<string>()
 
 export const useStoryStore = create<StoryState>((set, get) => {
   function persist(board: Storyboard) {
-    if (!get().persistent) return
+    if (!get().persistent || saveScheduled.has(board.projectId)) return
+    saveScheduled.add(board.projectId)
     const previous = saveQueues.get(board.projectId) ?? Promise.resolve()
     const next = previous.then(async () => {
+      saveScheduled.delete(board.projectId)
       const latest = get().boards[board.projectId]
       if (!latest) return
       try {
@@ -146,11 +155,11 @@ export const useStoryStore = create<StoryState>((set, get) => {
     saveQueues.set(board.projectId, next)
   }
 
-  function commit(projectId: string, change: (board: Storyboard) => Storyboard) {
+  function commit(projectId: string, change: (board: Storyboard) => Storyboard, prompts = true) {
     const current = get().ensureBoard(projectId)
     const changed = change(current)
     if (changed === current) return
-    const board = withPrompts(changed)
+    const board = prompts ? withPrompts(changed) : changed
     set((s) => ({ boards: { ...s.boards, [projectId]: board } }))
     persist(board)
   }
@@ -174,10 +183,17 @@ export const useStoryStore = create<StoryState>((set, get) => {
           const records = await repository.listStoryboards()
           const boards: Record<string, Storyboard> = {}
           let skipped = 0
+          const recoveredIds: string[] = []
           for (const r of records) {
-            const board = fromRecord(r)
-            if (board) boards[board.projectId] = board
-            else skipped += 1
+            const parsed = fromRecord(r)
+            if (!parsed) {
+              skipped += 1
+              continue
+            }
+            // lote que estava rodando quando o app fechou: pausa e confere
+            const { board, recovered, interrupted } = await recoverInterruptedRun(parsed, (id) => repository.getAsset(id))
+            if (recovered || interrupted || board !== parsed) recoveredIds.push(board.projectId)
+            boards[board.projectId] = board
           }
           set({
             hydrated: true,
@@ -185,6 +201,7 @@ export const useStoryStore = create<StoryState>((set, get) => {
             boards,
             issue: skipped ? `${skipped} storyboard(s) salvo(s) em formato desconhecido foram ignorados.` : null,
           })
+          for (const id of recoveredIds) persist(boards[id])
         } catch (err) {
           set({ hydrated: true, persistent: false, issue: toStorageError(err, 'read').message })
         }
@@ -285,6 +302,17 @@ export const useStoryStore = create<StoryState>((set, get) => {
     },
 
     dismissIssue: () => set({ issue: null }),
+
+    mutate: (projectId, change, options) => commit(projectId, change, options?.prompts ?? true),
+
+    forget: (projectId) => {
+      if (!get().boards[projectId]) return
+      set((s) => {
+        const boards = { ...s.boards }
+        delete boards[projectId]
+        return { boards }
+      })
+    },
   }
 })
 

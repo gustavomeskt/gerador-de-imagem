@@ -17,10 +17,18 @@ export interface CastGroup {
   imageCount: number
 }
 
+// Imagem de uma cena anterior da mesma história, usada só para continuidade
+// (roupa, cenário, objetos) — nunca como fonte de identidade.
+export interface ContinuityGroup {
+  label: string
+  imageCount: number
+}
+
 export interface ComposeInput {
   scene: string
   cast?: CastGroup[]
   references?: ReferenceGroup[]
+  continuity?: ContinuityGroup[]
   style?: StyleGuide | null
 }
 
@@ -89,12 +97,13 @@ function styleLines(style: StyleGuide): string[] {
 export function composePrompt(input: ComposeInput): string {
   const cast = input.cast ?? []
   const refs = input.references ?? []
+  const continuity = input.continuity ?? []
   const style = input.style?.enabled ? input.style : null
-  if (cast.length === 0 && refs.length === 0 && !style) return input.scene
+  if (cast.length === 0 && refs.length === 0 && continuity.length === 0 && !style) return input.scene
 
   const out: string[] = []
   let next = 1
-  if (cast.length || refs.length) {
+  if (cast.length || refs.length || continuity.length) {
     out.push('Reference images are attached, in this order:')
     for (const g of cast) {
       out.push(castLine(next, g))
@@ -102,6 +111,14 @@ export function composePrompt(input: ComposeInput): string {
     }
     for (const g of refs) {
       out.push(`- ${imageRange(next, g.imageCount)}: "${g.label.trim() || 'sem nome'}" — ${ROLE_INSTRUCTIONS[g.role](g)}`)
+      next += g.imageCount
+    }
+    for (const g of continuity) {
+      out.push(
+        `- ${imageRange(next, g.imageCount)}: ${g.label} — an earlier scene of this same story, for CONTINUITY ONLY: ` +
+          'keep the same clothing, the same environment (layout, furniture, colors, lighting) and the same important objects. ' +
+          'Do not copy its pose, framing or action, and never take anyone\'s identity from it — identities come only from the character photos.',
+      )
       next += g.imageCount
     }
   }
@@ -118,7 +135,7 @@ export function composePrompt(input: ComposeInput): string {
     out.push('Project style guide:')
     out.push(...styleLines(style))
   }
-  if (cast.length || refs.length || style?.noText) {
+  if (cast.length || refs.length || continuity.length || style?.noText) {
     out.push('Do not add any text, captions, logos or watermarks to the image.')
   }
   out.push('Depict only what the scene describes; do not invent events, people or objects that are not in it.')
