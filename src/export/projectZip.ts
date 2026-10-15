@@ -7,6 +7,7 @@ import type { StyleGuide } from '../generation/styleGuide'
 import type { SceneImageVersion } from '../batch/types'
 import type { Storyboard } from '../story/types'
 import { isOutdated } from '../batch/versions'
+import { FORMAT_LABELS, isNineSixteen, type FormatMethod } from '../batch/format'
 
 // Exportação do projeto em ZIP: todas as imagens prontas, em ordem, com nomes
 // padronizados, e um manifest.json descrevendo cada arquivo (origem, prompt,
@@ -106,6 +107,23 @@ export interface ManifestSceneImage {
   references: Array<{ kind: string; label: string; sha256: string | null; characterId?: string; sceneId?: string }>
   characters: Array<{ characterId: string; name: string; version: number }>
   format: SceneImageVersion['format']
+  formatMethod: FormatMethod
+  review: { status: string; problems: string[]; note: string } | null
+}
+
+export interface ManifestVersion {
+  versionId: string
+  createdAt: string
+  model: string
+  size: string
+  width: number | null
+  height: number | null
+  sha256: string
+  simulated: boolean
+  official: boolean
+  formatMethod: FormatMethod
+  derivedFrom: string | null
+  review: { status: string; problems: string[]; note: string; reviewedAt: string | null } | null
 }
 
 export interface ManifestScene {
@@ -119,6 +137,9 @@ export interface ManifestScene {
   motion: string
   image: ManifestSceneImage | null
   versionsAvailable: number
+  versions: ManifestVersion[] // histórico completo (as imagens não oficiais não vão no ZIP)
+  readyForAnimation: boolean
+  notReadyReasons: string[]
   missing?: string
 }
 
@@ -132,7 +153,9 @@ export interface ManifestStoryboard {
   sceneCount: number
   imagesExported: number
   simulatedImages: number
+  readyForAnimation: number
   animationNote: string
+  history: Storyboard['history']
   scenes: ManifestScene[]
 }
 
@@ -412,8 +435,22 @@ export const ANIMATION_NOTE =
   'Esta ferramenta ainda NÃO anima as imagens. Cada cena traz a imagem oficial e uma orientação de movimento ' +
   '(só a ação já descrita na copy) para você usar ao animar no Google Flow.'
 
-export function sceneFileName(number: number, mimeType: string): string {
-  return `${STORYBOARD_DIR}/cenas/cena_${pad(number, 3)}.${extensionFor(mimeType)}`
+// Imagens simuladas (fictícias) levam "_SIMULADA" no nome: nunca se
+// confundem com arquivos reais prontos para animar.
+export function sceneFileName(number: number, mimeType: string, simulated = false): string {
+  return `${STORYBOARD_DIR}/cenas/cena_${pad(number, 3)}${simulated ? '_SIMULADA' : ''}.${extensionFor(mimeType)}`
+}
+
+// Pronta para animar no Google Flow: imagem real (não simulada), aprovada
+// pela pessoa e em 9:16 (nativo, expandido ou reenquadrado).
+export function readinessOf(image: ManifestSceneImage | null, missing?: string): { ready: boolean; reasons: string[] } {
+  if (!image) return { ready: false, reasons: [missing ?? 'sem imagem oficial'] }
+  const reasons: string[] = []
+  if (image.simulated) reasons.push('imagem simulada (fictícia)')
+  if (!image.approved) reasons.push('imagem ainda não aprovada')
+  if (image.formatMethod === 'unadjusted') reasons.push('formato ainda não é 9:16')
+  if (image.outdated) reasons.push('cena editada depois da imagem')
+  return { ready: reasons.length === 0, reasons }
 }
 
 function sceneTitle(excerpt: string): string {
@@ -434,6 +471,7 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
   ]
   let exported = 0
   let simulated = 0
+  let ready = 0
 
   for (const [i, scene] of board.scenes.entries()) {
     const number = i + 1
@@ -452,7 +490,7 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
       if (!bytes && official.src?.startsWith('data:')) bytes = dataUrlToBytes(official.src).bytes
       if (!bytes) missing = 'arquivo da imagem não encontrado no armazenamento local'
       else {
-        const file = sceneFileName(number, official.mimeType)
+        const file = sceneFileName(number, official.mimeType, official.simulated)
         const promptFile = `${STORYBOARD_DIR}/prompts/cena_${pad(number, 3)}.txt`
         zip.file(file, bytes, { binary: true })
         zip.file(promptFile, official.prompt)
@@ -483,6 +521,8 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
           })),
           characters: official.characters.map((c) => ({ characterId: c.characterId, name: c.name, version: c.version })),
           format: official.format,
+          formatMethod: official.format.method ?? (isNineSixteen(official.width, official.height) ? 'native' : 'unadjusted'),
+          review: official.review ? { status: official.review.status, problems: official.review.problems, note: official.review.note } : null,
         }
       }
     }
@@ -497,12 +537,33 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
       motion: scene.motion,
       image,
       versionsAvailable: scene.images?.length ?? 0,
+      versions: (scene.images ?? []).map((v) => ({
+        versionId: v.id,
+        createdAt: new Date(v.createdAt).toISOString(),
+        model: v.model,
+        size: v.size,
+        width: v.width,
+        height: v.height,
+        sha256: v.sha256,
+        simulated: v.simulated,
+        official: v.id === scene.officialImageId,
+        formatMethod: v.format.method ?? (isNineSixteen(v.width, v.height) ? 'native' : 'unadjusted'),
+        derivedFrom: v.derivedFrom ?? null,
+        review: v.review
+          ? { status: v.review.status, problems: v.review.problems, note: v.review.note, reviewedAt: v.review.reviewedAt ? new Date(v.review.reviewedAt).toISOString() : null }
+          : null,
+      })),
+      ...readinessToFields(readinessOf(image, missing)),
       ...(missing ? { missing } : {}),
     })
+    if (readinessOf(image, missing).ready) ready += 1
 
     guide.push(`## Cena ${pad(number, 3)} — ${title}`)
     guide.push('')
-    guide.push(`- Imagem: ${image ? image.file.replace(`${STORYBOARD_DIR}/`, '') : `(${missing})`}${image?.simulated ? ' — IMAGEM SIMULADA (fictícia)' : ''}${image && !image.approved ? ' — ainda não aprovada' : ''}`)
+    const readiness = readinessOf(image, missing)
+    guide.push(`- Situação: ${readiness.ready ? 'PRONTA para animar' : `NÃO PRONTA — ${readiness.reasons.join('; ')}`}`)
+    guide.push(`- Imagem: ${image ? image.file.replace(`${STORYBOARD_DIR}/`, '') : `(${missing})`}${image?.simulated ? ' — IMAGEM SIMULADA (fictícia), não use para animar' : ''}`)
+    if (image) guide.push(`- Formato: ${FORMAT_LABELS[image.formatMethod]} — ${image.width}×${image.height}`)
     guide.push(`- Personagens: ${characters.join(', ') || '—'}`)
     if (scene.environment) guide.push(`- Ambiente: ${scene.environment}`)
     if (scene.camera || scene.framing) guide.push(`- Câmera: ${[scene.framing, scene.camera].filter(Boolean).join('; ')}`)
@@ -539,8 +600,9 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
       'copy_original.txt        a copy exatamente como foi colada',
       'storyboard.json          o storyboard completo (cenas, personagens, histórico, versões)',
       '',
-      simulated ? `ATENÇÃO: ${simulated} imagem(ns) são SIMULADAS (fictícias, geradas sem IA) — servem só para testar o fluxo.` : '',
-      'Formato: as imagens estão no formato vertical nativo do modelo, sem recorte; o ajuste para 9:16 ainda não foi feito.',
+      `Prontas para animar (reais, aprovadas e em 9:16): ${ready} de ${board.scenes.length} cena(s).`,
+      simulated ? `ATENÇÃO: ${simulated} imagem(ns) são SIMULADAS (fictícias, geradas sem IA; nome termina em _SIMULADA) — servem só para testar o fluxo, NÃO para animar.` : '',
+      'Formato de cada imagem (nativo, expandido ou reenquadrado) e o histórico de versões e aprovações estão no manifest.json.',
     ]
       .filter((l) => l !== null)
       .join('\n'),
@@ -556,7 +618,13 @@ async function addStoryboard(zip: JSZip, board: Storyboard, loadAsset: AssetLoad
     sceneCount: board.scenes.length,
     imagesExported: exported,
     simulatedImages: simulated,
+    readyForAnimation: ready,
     animationNote: ANIMATION_NOTE,
+    history: board.history,
     scenes,
   }
+}
+
+function readinessToFields(r: { ready: boolean; reasons: string[] }) {
+  return { readyForAnimation: r.ready, notReadyReasons: r.reasons }
 }

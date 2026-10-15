@@ -175,4 +175,28 @@ describe('lote do storyboard: orçamento e autorização por cena', () => {
     const svg = Buffer.from(res.json.images[0].b64, 'base64').toString('utf8')
     expect(svg).toContain('3 referência(s)')
   })
+
+  it('gpt-image-2: 9:16 nativo (1152x2048) aceito; input_fidelity recusado (o SDK manda omitir); preço marcado como não confirmado', async () => {
+    const { t, openai } = await openaiServer()
+    const items = [{ prompt: 'Cena 1', references: [D_MARIA] }]
+    const bad = await t.request('POST', '/api/images/batch-quote', { body: { model: 'gpt-image-2', size: '1152x2048', quality: 'medium', inputFidelity: 'high', items } })
+    expect(bad.status).toBe(400)
+    const q = await t.request('POST', '/api/images/batch-quote', { body: { model: 'gpt-image-2', size: '1152x2048', quality: 'medium', items } })
+    expect(q.status).toBe(200)
+    expect(q.json.notes.join(' ')).toMatch(/gpt-image-2: preço NÃO confirmado/)
+    const odd = await t.request('POST', '/api/images/batch-quote', { body: { model: 'gpt-image-2', size: '1080x1920', quality: 'medium', items } })
+    expect(odd.status).toBe(400) // 1080 não é múltiplo de 16
+    const gen = await gen2(t, q.json.quoteId)
+    expect(gen.status).toBe(200)
+    const form = openai.calls[0].init.body as FormData
+    expect(form.get('size')).toBe('1152x2048')
+    expect(form.get('model')).toBe('gpt-image-2')
+    expect(form.get('input_fidelity')).toBeNull()
+  })
 })
+
+const gen2 = (server: TestServer, quoteId: string) =>
+  server.request('POST', '/api/images/generate', {
+    body: { model: 'gpt-image-2', size: '1152x2048', quality: 'medium', prompt: 'Cena 1', n: 1, references: [up(MARIA, 'image/png')] },
+    headers: { 'X-Cost-Quote': quoteId },
+  })

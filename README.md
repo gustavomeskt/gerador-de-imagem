@@ -425,7 +425,7 @@ imagens**.
   cadastro (vão sem foto), fotos ausentes, personagem excluído, cenas com mais
   personagens do que o limite de fotos (ficam de fora para revisão — nada é
   descartado em silêncio) e cenas com alertas;
-- modelo (GPT Image 1.5, 1 ou 1 Mini — os que aceitam fotos), qualidade,
+- modelo (GPT Image 2 — padrão, 9:16 nativo —, 1.5, 1 ou 1 Mini: os que aceitam fotos), tamanho, qualidade,
   fidelidade às fotos, quantas imagens ao mesmo tempo e o modo de
   continuidade;
 - com o provedor **Simulado**: aviso de que as imagens são **fictícias** (sem
@@ -475,10 +475,9 @@ comparar com a oficial e escolher a oficial. Uma versão nova nunca substitui
 uma imagem **aprovada** sem a pessoa escolher. Cena editada depois da geração
 mostra "cena editada depois desta imagem".
 
-**Formato:** geração em 1024×1536 (vertical **2:3**, nativo do modelo) **sem
-recorte** — nenhum rosto, mão ou objeto é cortado às cegas. O alvo 9:16
-(1080×1920) exige reenquadramento ou expansão, que fica para a próxima etapa
-(com conferência). As instruções já pedem a ação na área central vertical.
+**Formato 9:16** (veja "Formato vertical 9:16" abaixo): padrão gpt-image-2 em
+1152×2048 (9:16 nativo); modelos sem 9:16 geram 2:3 sem recorte e ganham uma
+versão 9:16 expandida.
 
 **Exportar para o Google Flow (ZIP)** — além do que o ZIP do projeto já tinha:
 
@@ -486,6 +485,7 @@ recorte** — nenhum rosto, mão ou objeto é cortado às cegas. O alvo 9:16
 storyboard/
 ├── LEIA-ME.txt
 ├── cenas/cena_001.png …      ← imagem OFICIAL de cada cena, na ordem da história
+│                               (simuladas: cena_001_SIMULADA.svg — nunca usar para animar)
 ├── prompts/cena_001.txt …    ← texto exato enviado para cada imagem oficial
 ├── roteiro_google_flow.md    ← por cena: imagem, personagens, câmera, MOVIMENTO e trecho da copy
 ├── copy_original.txt         ← a copy exatamente como foi colada
@@ -499,6 +499,10 @@ que aparecem. **A ferramenta ainda não anima as imagens** — o roteiro traz a
 orientação de movimento para usar no Google Flow. Imagens simuladas saem como
 `.svg` e marcadas como fictícias.
 
+Cada cena do manifesto diz se está **pronta para animar** (imagem real, aprovada
+e em 9:16) e, se não, por quê; traz também o histórico de todas as versões
+(formato, origem, revisão e problemas marcados) e o histórico de aprovações.
+
 Servidor: `MAX_IMAGES_PER_BATCH`, `MAX_COST_PER_BATCH_USD` (lote inteiro),
 `MAX_COST_PER_JOB_USD` (cada cena), limites diários e
 `BATCH_QUOTE_TTL_SECONDS`. Cada chamada do lote precisa bater com uma cena do
@@ -506,6 +510,75 @@ orçamento confirmado (prompt, modelo, tamanho, qualidade, fidelidade e fotos
 pelo hash); mudar qualquer coisa invalida a autorização. Uma cena recusada
 pela OpenAI (sem cobrança) volta ao orçamento para nova tentativa; em tempo
 esgotado, não.
+
+## Formato vertical 9:16
+
+Conferido no SDK oficial da OpenAI (openai-python, `image_generate_params.py` e
+`image_edit_params.py`, gerados da especificação OpenAPI, out/2026):
+
+| Modelo | 9:16 nativo? | Observação |
+|---|---|---|
+| **gpt-image-2** | **Sim** (confirmado) | tamanhos livres, múltiplos de 16, proporção entre 1:3 e 3:1. Usamos **1152×2048** (9:16 exato; reduz sem distorção para 1080×1920) e 1008×1792. **1080×1920 não é aceito** (1080 não é múltiplo de 16). Aceita fotos de referência; `input_fidelity` deve ser omitido. |
+| gpt-image-1.5 / 1 / 1-mini | Não | só 1024×1024, 1024×1536 (2:3) e 1536×1024 |
+| dall-e-2 / dall-e-3 | — | descontinuados pela OpenAI em 12/05/2026 (mantidos só para projetos antigos) |
+| gpt-image-2.5 (sunburst/flare) | Sim, segundo o SDK | não adicionados: preço e fidelidade às fotos não verificados |
+
+O **preço** do gpt-image-2 não pôde ser lido na documentação oficial a partir
+deste ambiente; o orçamento usa o maior valor público encontrado,
+proporcional à área, e avisa isso no diálogo de custo.
+
+Como cada imagem chega a 9:16 (sempre informado num selo):
+
+- **9:16 nativo** — gerada assim pelo modelo.
+- **9:16 expandido** — a imagem 2:3 **inteira** dentro do quadro 1080×1920,
+  sem corte e sem distorção; as faixas acima/abaixo são a própria imagem
+  desfocada (não são conteúdo novo). Automático no lote (opção marcada) ou
+  em "Expandir para 9:16 as que faltam" — imagens aprovadas não são trocadas
+  sem decisão individual.
+- **9:16 reenquadrado** — recorte com a posição escolhida num controle
+  deslizante, com a área mantida desenhada sobre a imagem e a perda informada
+  (lados e %). Acima de 20% de perda, só com confirmação.
+- **Ainda não está em 9:16** — formato do modelo, sem nenhum recorte.
+
+Não existe recorte central automático nem esticar a imagem. Cada ajuste vira
+uma **versão nova**; a original fica guardada. Os nós de imagem do canvas
+também deixaram de recortar no centro: o formato pedido é obtido enquadrando
+a imagem inteira.
+
+## Revisão visual das imagens
+
+Botão **Revisar e comparar** em cada imagem:
+
+- **Comparar lado a lado** com a foto original de cada personagem da cena,
+  com outra versão da mesma cena ou com outra cena do mesmo personagem.
+- **Zoom** 2× e 4× (com rolagem) para conferir rosto, mãos e objetos.
+- **Verificação automática** feita nos **pixels** da imagem: dimensões reais
+  e formato, imagem praticamente vazia (falha de geração), imagem quase
+  idêntica à de outra cena e distância visual em relação à cena anterior
+  aprovada do mesmo personagem. São indicadores técnicos — o app avisa que
+  não provam fidelidade.
+- **Revisão humana** (checklist montado da cena): número de pessoas, rosto de
+  cada personagem, roupa, ambiente, objetos, ação do trecho, cortes e
+  ausência de texto — cada item OK / Problema / N/A. Nada disso é dado como
+  verificado automaticamente.
+- **Problemas** marcáveis: rosto diferente, pessoas a mais/a menos, roupa,
+  cenário, objeto, enquadramento, corte, baixa qualidade, texto, acontecimento
+  fora da copy.
+- **Aprovar** ou **rejeitar** cada imagem. "Regenerar só as rejeitadas" gera
+  de novo apenas essas. Trocar ou rejeitar uma imagem oficial aprovada sempre
+  pede confirmação.
+
+**Consistência nas instruções:** cada prompt diz quantas pessoas devem
+aparecer (e quem), as posições quando preenchidas no campo "Posições na
+imagem", e a prioridade de identidade (fotos dos personagens > ficha >
+imagem de cena anterior, que só serve para roupa/cenário). Conflitos viram
+aviso ou bloqueio, nunca são ignorados: duas pessoas da cena ligadas à mesma
+ficha (bloqueia — os rostos se misturariam), personagens diferentes com a
+mesma foto, roupa que muda sem a copy indicar troca, falta de espaço para a
+imagem de continuidade.
+
+**Testes reais:** plano com orçamento pequeno em
+[`docs/PLANO_TESTES_REAIS.md`](docs/PLANO_TESTES_REAIS.md) — não executado.
 
 ## Armazenamento e exportação
 

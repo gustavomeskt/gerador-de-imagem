@@ -154,6 +154,12 @@ export default function SceneEditor({
         <CommitField label="Passagem de tempo" value={scene.timeShift} onCommit={(v) => patch({ timeShift: v })} />
         <CommitField label="Continuidade" value={scene.continuity} onCommit={(v) => patch({ continuity: v })} multiline />
         <CommitField label="Enquadramento" value={scene.framing} onCommit={(v) => patch({ framing: v })} />
+        <CommitField
+          label="Posições na imagem (esquerda → direita)"
+          value={scene.positions ?? ''}
+          onCommit={(v) => patch({ positions: v })}
+          placeholder="Ex.: Dona Maria à esquerda, Seu João à direita"
+        />
         <CommitField label="Posição e ângulo da câmera" value={scene.camera} onCommit={(v) => patch({ camera: v })} />
         <CommitField
           label="Descrição visual (só composição — nada de acontecimento novo)"

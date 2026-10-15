@@ -2,11 +2,21 @@
 // simuladas) em PNG, desenhando-a num canvas. Só funciona no navegador.
 
 export function rasterizeToPng(bytes: Uint8Array, mimeType: string): Promise<Uint8Array> {
-  return new Promise((resolve, reject) => {
-    if (typeof document === 'undefined' || typeof Image === 'undefined') {
+  return new Promise((resolve0, reject0) => {
+    let resolve = resolve0
+    let reject = reject0
+    if (typeof document === 'undefined' || typeof Image === 'undefined' || /jsdom/i.test(navigator.userAgent)) {
       reject(new Error('conversão de imagem indisponível neste ambiente'))
       return
     }
+    // imagem que nunca carrega (nem dá erro) não pode travar a fila
+    const timer = setTimeout(() => reject(new Error('tempo esgotado ao carregar a imagem')), 8000)
+    const done = <T,>(fn: (v: T) => void) => (v: T) => {
+      clearTimeout(timer)
+      fn(v)
+    }
+    resolve = done(resolve)
+    reject = done(reject)
     const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type: mimeType }))
     const img = new Image()
     img.onload = () => {

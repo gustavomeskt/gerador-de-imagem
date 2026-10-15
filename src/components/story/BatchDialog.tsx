@@ -1,22 +1,44 @@
 import { AlertTriangle, CircleDollarSign, FlaskConical, Images, Loader2, X } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { CONTINUITY_LABELS, type BatchScope, type BatchSettings, type ContinuityMode } from '../../batch/types'
-import { MODEL_LABELS, MODEL_QUALITIES, type ImageModel } from '../../generation/models'
+import { MODEL_LABELS, MODEL_QUALITIES, MODEL_SIZES, type ImageModel } from '../../generation/models'
+import { isNineSixteen } from '../../batch/format'
 import { REFERENCE_SUPPORT } from '../../generation/references'
-import { DEFAULT_BATCH_SETTINGS, FORMAT_NOTE, previewBatch, startBatch, type StartResult } from '../../store/batchController'
+import { DEFAULT_BATCH_SETTINGS, formatNoteFor, previewBatch, startBatch, type StartResult } from '../../store/batchController'
 import { useCharacterStore } from '../../store/useCharacterStore'
 import { useFlowStore } from '../../store/useFlowStore'
 import type { Storyboard } from '../../story/types'
 
-const BATCH_MODELS: ImageModel[] = ['gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini']
+const BATCH_MODELS: ImageModel[] = ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1', 'gpt-image-1-mini']
+
+// tamanhos verticais oferecidos no lote: 9:16 nativo quando o modelo tem;
+// senão o retrato do modelo (2:3), que depois é expandido sem corte
+function verticalSizes(model: ImageModel) {
+  const sizes = MODEL_SIZES[model]
+  const native = sizes.filter((s) => {
+    const [w, h] = s.value.split('x').map(Number)
+    return isNineSixteen(w, h)
+  })
+  return native.length ? native : sizes.filter((s) => s.value === '1024x1536')
+}
 
 // Antes de gerar: o que vai ser gerado, o que ficou de fora e por quê, as
 // opções e o aviso de custo. Nada é chamado até a pessoa confirmar.
-export default function BatchDialog({ board, onClose, onDone }: { board: Storyboard; onClose: () => void; onDone: (r: StartResult) => void }) {
+export default function BatchDialog({
+  board,
+  initialScope = 'all',
+  onClose,
+  onDone,
+}: {
+  board: Storyboard
+  initialScope?: BatchScope
+  onClose: () => void
+  onDone: (r: StartResult) => void
+}) {
   const providerKind = useFlowStore((s) => s.providerKind)
   const library = useCharacterStore((s) => s.characters)
   const [settings, setSettings] = useState<BatchSettings>(() => ({ ...DEFAULT_BATCH_SETTINGS, ...(board.batch?.settings ?? {}) }))
-  const [scope, setScope] = useState<BatchScope>('all')
+  const [scope, setScope] = useState<BatchScope>(initialScope)
   const [selected, setSelected] = useState<string[]>([])
   const [starting, setStarting] = useState(false)
 
@@ -27,7 +49,7 @@ export default function BatchDialog({ board, onClose, onDone }: { board: Storybo
     [board, settings, scope, selected, library, providerKind],
   )
   const fidelityOptions = REFERENCE_SUPPORT[settings.model]?.fidelity ?? []
-  const excluded = plan.scenes.filter((s) => !s.included && s.reason && s.reason !== 'não selecionada' && s.reason !== 'já tem imagem')
+  const excluded = plan.scenes.filter((s) => !s.included && s.reason && !['não selecionada', 'já tem imagem', 'imagem não rejeitada'].includes(s.reason))
   const warned = plan.scenes.filter((s) => s.included && s.warnings.length > 0)
   const set = (patch: Partial<BatchSettings>) => setSettings((s) => ({ ...s, ...patch }))
 
@@ -76,6 +98,7 @@ export default function BatchDialog({ board, onClose, onDone }: { board: Storybo
               [
                 ['all', 'Todas as cenas aprovadas'],
                 ['pending', 'Só as cenas ainda sem imagem'],
+                ['rejected', 'Só as imagens rejeitadas na revisão'],
                 ['selected', 'Só as cenas que eu escolher'],
               ] as Array<[BatchScope, string]>
             ).map(([value, label]) => (
@@ -104,7 +127,13 @@ export default function BatchDialog({ board, onClose, onDone }: { board: Storybo
             <legend>Modelo e qualidade</legend>
             <label className="ifs-story-field">
               <span>Modelo</span>
-              <select value={settings.model} onChange={(e) => set({ model: e.target.value as ImageModel })}>
+              <select
+                value={settings.model}
+                onChange={(e) => {
+                  const model = e.target.value as ImageModel
+                  set({ model, size: verticalSizes(model)[0].value, quality: settings.quality })
+                }}
+              >
                 {BATCH_MODELS.map((m) => (
                   <option key={m} value={m}>
                     {MODEL_LABELS[m]}
@@ -112,6 +141,22 @@ export default function BatchDialog({ board, onClose, onDone }: { board: Storybo
                 ))}
               </select>
             </label>
+            <label className="ifs-story-field">
+              <span>Tamanho</span>
+              <select value={settings.size} onChange={(e) => set({ size: e.target.value })}>
+                {verticalSizes(settings.model).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {verticalSizes(settings.model)[0].value === '1024x1536' && (
+              <label className="ifs-radio">
+                <input type="checkbox" checked={!!settings.autoExpand} onChange={(e) => set({ autoExpand: e.target.checked })} /> Criar a versão 9:16
+                expandida automaticamente (sem corte)
+              </label>
+            )}
             <label className="ifs-story-field">
               <span>Qualidade</span>
               <select value={settings.quality} onChange={(e) => set({ quality: e.target.value })}>
@@ -160,7 +205,7 @@ export default function BatchDialog({ board, onClose, onDone }: { board: Storybo
             <strong>{plan.summary.images}</strong> imagem(ns) serão geradas — uma por cena, cada uma com o próprio prompt e as
             fotos dos personagens da cena · {MODEL_LABELS[settings.model]} · {settings.size}
           </p>
-          <p className="ifs-muted">{FORMAT_NOTE}</p>
+          <p className="ifs-muted">{formatNoteFor(settings)}</p>
           <ul>
             <li className={plan.summary.storyboardApproved ? 'ifs-ok' : 'ifs-warn'}>
               {plan.summary.storyboardApproved ? 'Storyboard revisado e aprovado.' : `Storyboard ainda não aprovado por completo: ${plan.summary.notApproved} cena(s) não aprovada(s) ficam de fora.`}

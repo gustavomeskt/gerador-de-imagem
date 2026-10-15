@@ -52,6 +52,7 @@ export interface StoryScene {
   timeShift: string // passagem de tempo indicada na copy
   continuity: string // notas de continuidade (mesmo ambiente, mesma roupa…)
   framing: string // enquadramento
+  positions?: string // posições dos personagens na imagem (esquerda → direita)
   camera: string // posição e ângulo da câmera
   visualDescription: string // composição (não acrescenta acontecimentos)
   motion: string // orientação de movimento para animação (só a ação descrita)

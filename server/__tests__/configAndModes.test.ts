@@ -17,7 +17,8 @@ describe('configuração segura', () => {
   it('padrões: modo simulado, só 127.0.0.1, sem chave', () => {
     const c = loadConfig({})
     expect(c).toMatchObject({ mode: 'simulated', host: '127.0.0.1', port: 8787, openaiApiKey: undefined })
-    expect(c.allowedModels).toHaveLength(5)
+    expect(c.allowedModels).toHaveLength(6)
+    expect(c.allowedModels).toContain("gpt-image-2")
   })
 
   it('recusa escutar fora do próprio computador', () => {

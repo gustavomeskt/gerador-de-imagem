@@ -18,7 +18,9 @@ export interface ReferenceSupport {
   fidelity: InputFidelity[] // valores aceitos de input_fidelity
 }
 
+// gpt-image-2: aceita as fotos (até 16), mas o SDK manda OMITIR input_fidelity.
 export const REFERENCE_SUPPORT: Record<ImageModel, ReferenceSupport | null> = {
+  'gpt-image-2': { maxImages: 16, fidelity: [] },
   'gpt-image-1.5': { maxImages: 16, fidelity: ['high', 'low'] },
   'gpt-image-1': { maxImages: 16, fidelity: ['high', 'low'] },
   'gpt-image-1-mini': { maxImages: 16, fidelity: ['low'] },

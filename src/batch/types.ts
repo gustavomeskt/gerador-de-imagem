@@ -1,6 +1,7 @@
 import type { ImageModel } from '../generation/models'
 import type { InputFidelity } from '../generation/references'
 import type { ProviderKind } from '../generation/types'
+import type { FormatMethod } from './format'
 
 // Geração em lote a partir do storyboard: uma tarefa por cena, cada uma com o
 // prompt e as referências daquela cena "congelados" no momento do
@@ -9,7 +10,7 @@ import type { ProviderKind } from '../generation/types'
 export type ImageTaskStatus = 'pending' | 'running' | 'done' | 'failed' | 'cancelled'
 
 // Estado da imagem de uma cena, como aparece na tela.
-export type SceneImageState = ImageTaskStatus | 'approved' | 'none'
+export type SceneImageState = ImageTaskStatus | 'approved' | 'rejected' | 'none'
 
 export const IMAGE_STATE_LABELS: Record<SceneImageState, string> = {
   none: 'Sem imagem',
@@ -19,6 +20,7 @@ export const IMAGE_STATE_LABELS: Record<SceneImageState, string> = {
   failed: 'Falhou',
   cancelled: 'Cancelada',
   approved: 'Aprovada',
+  rejected: 'Rejeitada',
 }
 
 // Imagens de cenas anteriores como referência de continuidade:
@@ -34,7 +36,7 @@ export const CONTINUITY_LABELS: Record<ContinuityMode, string> = {
   chain: 'Encadear: esperar a cena anterior e usar a imagem dela (mais lento, em sequência)',
 }
 
-export type BatchScope = 'all' | 'pending' | 'selected' | 'single'
+export type BatchScope = 'all' | 'pending' | 'rejected' | 'selected' | 'single'
 
 export interface BatchSettings {
   model: ImageModel
@@ -43,6 +45,9 @@ export interface BatchSettings {
   inputFidelity?: InputFidelity
   continuity: ContinuityMode
   concurrency: number
+  // modelo sem 9:16 nativo: criar automaticamente a versão 9:16 expandida
+  // (imagem inteira, sem corte) assim que cada imagem chegar
+  autoExpand?: boolean
 }
 
 // Uma imagem anexada ao pedido de uma cena.
@@ -105,10 +110,13 @@ export interface BatchRun {
 }
 
 export interface ImageFormatInfo {
+  method?: FormatMethod // ausente em versões antigas (ver formatMethodOf)
   nativeWidth: number | null
   nativeHeight: number | null
   target: '9:16'
-  cropped: false
+  cropped: boolean
+  lossPercent?: number // reenquadramento: quanto ficou de fora
+  scale?: number // expansão: escala aplicada à imagem original
   note: string
 }
 
@@ -136,4 +144,59 @@ export interface SceneImageVersion {
   characters: BatchTask['characters']
   sceneFingerprint: string
   format: ImageFormatInfo
+  derivedFrom?: string // versão de origem (ajuste de formato)
+  review?: ImageReview
+  analysis?: ImageAnalysis
+}
+
+// --- revisão humana de cada imagem ---
+
+export type ProblemTag =
+  | 'face'
+  | 'people_count'
+  | 'clothing'
+  | 'setting'
+  | 'object'
+  | 'framing'
+  | 'cut'
+  | 'quality'
+  | 'text'
+  | 'event'
+
+export const PROBLEM_LABELS: Record<ProblemTag, string> = {
+  face: 'Rosto diferente da pessoa',
+  people_count: 'Pessoas a mais ou a menos',
+  clothing: 'Roupa incorreta',
+  setting: 'Cenário diferente',
+  object: 'Objeto ausente ou errado',
+  framing: 'Enquadramento ruim',
+  cut: 'Corte em rosto, mão, pé ou objeto',
+  quality: 'Baixa qualidade / distorções',
+  text: 'Texto, legenda ou marca na imagem',
+  event: 'Acontecimento que não está na copy',
+}
+
+export type ChecklistAnswer = 'ok' | 'problem' | 'na'
+
+export interface ImageReview {
+  status: 'pending' | 'approved' | 'rejected'
+  problems: ProblemTag[]
+  checklist: Record<string, ChecklistAnswer>
+  note: string
+  reviewedAt: number | null
+}
+
+// Medidas feitas nos PIXELS da imagem (não no prompt): indicadores técnicos,
+// não prova de fidelidade.
+export interface ImageAnalysis {
+  measuredAt: number
+  width: number
+  height: number
+  aspectOk: boolean // bate com o tamanho pedido / 9:16
+  blank: boolean // imagem praticamente uniforme (falha de geração)
+  meanLuma: number
+  hash: string // assinatura visual (16×16, diferença de brilho)
+  similarToPrevious?: { sceneNumber: number; distance: number } // vs. imagem aprovada anterior do mesmo personagem
+  duplicateOf?: number // cena com imagem quase idêntica
+  unavailable?: string // análise não pôde ser feita (ex.: ambiente sem canvas)
 }

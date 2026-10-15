@@ -126,11 +126,12 @@ export function applyInterpretation(
 }
 
 const CONTENT_FIELDS: Array<keyof StoryScene> = [
+  'positions',
   'characterKeys', 'speakerKey', 'dialogue', 'environment', 'action', 'emotions', 'wardrobe', 'objects', 'timeShift',
   'continuity', 'framing', 'camera', 'visualDescription', 'motion', 'promptOverride',
 ]
 
-export type ScenePatch = Partial<Pick<StoryScene, 'characterKeys' | 'speakerKey' | 'dialogue' | 'environment' | 'action' | 'emotions' | 'wardrobe' | 'objects' | 'timeShift' | 'continuity' | 'framing' | 'camera' | 'visualDescription' | 'motion' | 'promptOverride' | 'flags'>>
+export type ScenePatch = Partial<Pick<StoryScene, 'positions' | 'characterKeys' | 'speakerKey' | 'dialogue' | 'environment' | 'action' | 'emotions' | 'wardrobe' | 'objects' | 'timeShift' | 'continuity' | 'framing' | 'camera' | 'visualDescription' | 'motion' | 'promptOverride' | 'flags'>>
 
 // Edita uma cena. Mudar o conteúdo de uma cena aprovada a devolve para
 // "revisada" (precisa ser aprovada de novo). O trecho da copy não é editável.

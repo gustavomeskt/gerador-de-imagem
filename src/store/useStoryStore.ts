@@ -320,3 +320,45 @@ export const useStoryStore = create<StoryState>((set, get) => {
 export async function flushStorySaves(): Promise<void> {
   await Promise.all([...saveQueues.values()])
 }
+
+// --- projeto apagado: nada da historinha fica para trás ---
+// (fica neste módulo, sempre carregado — não depende de a tela da
+// historinha ou das imagens ter sido aberta)
+
+const removalListeners = new Set<(projectId: string) => void>()
+export function onProjectRemoved(listener: (projectId: string) => void): () => void {
+  removalListeners.add(listener)
+  return () => removalListeners.delete(listener)
+}
+
+function removeProject(projectId: string, deleteRecord: boolean) {
+  for (const listener of removalListeners) listener(projectId)
+  useStoryStore.getState().forget(projectId)
+  saveScheduled.delete(projectId)
+  if (deleteRecord && useStoryStore.getState().persistent) {
+    // espera gravações em andamento e apaga o registro (o projeto já leva
+    // o storyboard junto; isto cobre registros que sobraram de versões antigas)
+    const pending = saveQueues.get(projectId) ?? Promise.resolve()
+    void pending.then(() => repository.deleteStoryboard(projectId)).catch(() => {})
+  }
+}
+
+// storyboards de projetos que já não existem (sobras): só com os dois
+// stores carregados do banco de verdade
+function pruneOrphanBoards() {
+  const flows = useFlowStore.getState()
+  const stories = useStoryStore.getState()
+  if (!flows.hydrated || flows.persistence !== 'indexeddb' || !stories.hydrated || !stories.persistent) return
+  const ids = new Set(flows.flows.map((f) => f.id))
+  for (const projectId of Object.keys(stories.boards)) if (!ids.has(projectId)) removeProject(projectId, true)
+}
+
+useFlowStore.subscribe((state, previous) => {
+  if (state.hydrated && !previous.hydrated) pruneOrphanBoards()
+  if (state.flows === previous.flows || !previous.hydrated) return
+  const ids = new Set(state.flows.map((f) => f.id))
+  for (const f of previous.flows) if (!ids.has(f.id)) removeProject(f.id, true)
+})
+useStoryStore.subscribe((state, previous) => {
+  if (state.hydrated && !previous.hydrated) pruneOrphanBoards()
+})

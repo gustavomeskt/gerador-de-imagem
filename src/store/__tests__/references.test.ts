@@ -281,7 +281,7 @@ describe('geração com referências', () => {
     connectRef(flowId, maria, imageId)
     await S().generate(flowId, imageId)
     expect(cap.requests).toHaveLength(0)
-    expect(imgNode(flowId, imageId).data.notice).toMatch(/DALL-E 3 não aceita imagens de referência/)
+    expect(imgNode(flowId, imageId).data.notice).toMatch(/DALL-E 3 \(descontinuado pela OpenAI\) não aceita imagens de referência/)
   })
 
   it('gpt-image-1-mini envia as fotos sem input_fidelity; nó de referência vazio é avisado', async () => {

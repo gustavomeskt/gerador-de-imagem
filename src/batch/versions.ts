@@ -41,7 +41,8 @@ export function taskForScene(run: BatchRun | null | undefined, sceneId: string):
 export function sceneImageState(scene: StoryScene, run: BatchRun | null | undefined): SceneImageState {
   const task = taskForScene(run, scene.id)
   if (task && task.status !== 'done') return task.status
-  if (officialVersion(scene)) return scene.imageApprovedAt ? 'approved' : 'done'
+  const official = officialVersion(scene)
+  if (official) return scene.imageApprovedAt ? 'approved' : official.review?.status === 'rejected' ? 'rejected' : 'done'
   return 'none'
 }
 

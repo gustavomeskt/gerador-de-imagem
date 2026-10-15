@@ -1,22 +1,25 @@
 import { classifyGenerationError } from '../batch/errors'
 import { officialVersion, planBatch, type BatchPlan } from '../batch/planner'
 import { GenerationQueue, type TaskPatch } from '../batch/queue'
-import type { BatchRun, BatchScope, BatchSettings, BatchTask, SceneImageVersion, TaskReference } from '../batch/types'
+import type { BatchRun, BatchScope, BatchSettings, BatchTask, ImageAnalysis, ImageReview, ProblemTag, SceneImageVersion, TaskReference } from '../batch/types'
 import { approveImage, chooseOfficial, unapproveImage, withNewVersion } from '../batch/versions'
-import { getSizeOption } from '../generation/models'
 import { getProvider } from '../generation/providers'
 import { effectiveFidelity, REFERENCE_MIME_TYPES, type ReferenceImageInput, type ReferenceMimeType } from '../generation/references'
 import { runGeneration } from '../generation/service'
 import { ProviderError, type BatchImageJob, type CostQuote, type ImageProvider } from '../generation/types'
-import { bytesToBase64, dataUrlToBytes, readImageSize, sha256Hex, toArrayBuffer } from '../lib/binary'
+import { bytesToBase64, bytesToDataUrl, dataUrlToBytes, readImageSize, sha256Hex, toArrayBuffer } from '../lib/binary'
 import { rasterizeToPng } from '../lib/rasterize'
+import { analyzeImage, DUPLICATE_DISTANCE, hashDistance, type PixelStats } from '../lib/imageAnalysis'
+import { emptyReview } from '../batch/review'
+import { expandToFrame, reframeToFrame } from '../lib/image'
+import { containRect, describeFormat, FORMAT_LABELS, isNineSixteen, MAX_REFRAME_LOSS, reframeRect, TARGET_HEIGHT, TARGET_WIDTH, type FormatMethod } from '../batch/format'
 import { getAssetUrl, releaseAssetUrl } from '../persistence/assetUrls'
 import { repository } from '../persistence/repository'
 import type { AssetRecord } from '../persistence/schema'
 import type { Storyboard, StoryScene } from '../story/types'
 import { useCharacterStore } from './useCharacterStore'
 import { useFlowStore } from './useFlowStore'
-import { flushStorySaves, useStoryStore } from './useStoryStore'
+import { flushStorySaves, onProjectRemoved, useStoryStore } from './useStoryStore'
 
 // Geração em lote das imagens do storyboard: planeja, pede orçamento e
 // confirmação (provedor pago), executa a fila, salva cada imagem assim que
@@ -26,19 +29,28 @@ import { flushStorySaves, useStoryStore } from './useStoryStore'
 // só o que não deve sobreviver a um recarregamento: a fila em execução e as
 // autorizações de custo desta sessão.
 
+// Padrão: gpt-image-2 em 1152×2048 (9:16 exato, nativo). Os modelos 1.x
+// geram 2:3 e a versão 9:16 é criada por expansão (sem corte).
 export const DEFAULT_BATCH_SETTINGS: BatchSettings = {
-  model: 'gpt-image-1.5',
-  size: '1024x1536',
+  model: 'gpt-image-2',
+  size: '1152x2048',
   quality: 'medium',
   inputFidelity: 'high',
   continuity: 'approved',
   concurrency: 2,
+  autoExpand: true,
 }
 
-export const FORMAT_NOTE =
-  'Gerada no formato vertical nativo do modelo (2:3), SEM recorte. O alvo é 9:16: o reenquadramento ou a expansão ' +
-  'para 9:16 fica para uma próxima etapa, com conferência de rostos, mãos e objetos. As instruções já pedem a ação ' +
-  'na área central vertical.'
+export function formatNoteFor(settings: Pick<BatchSettings, 'model' | 'size' | 'autoExpand'>): string {
+  const [w, h] = settings.size.split('x').map(Number)
+  if (isNineSixteen(w, h)) return `${settings.size}: 9:16 nativo do modelo — sem corte, sem expansão.`
+  return (
+    `${settings.size}: este modelo não gera 9:16. A imagem vem em ${w}×${h}, SEM recorte` +
+    (settings.autoExpand
+      ? '; em seguida é criada automaticamente uma versão 9:16 expandida (imagem inteira + bordas preenchidas com a própria imagem desfocada). A original fica guardada.'
+      : '; ajuste para 9:16 depois, imagem por imagem (expandir ou reenquadrar).')
+  )
+}
 
 export type StartResult = { ok: true; images: number; simulated: boolean } | { ok: false; cancelled?: boolean; error: string }
 
@@ -47,6 +59,7 @@ interface Engine {
   provider: ImageProvider
   authorized: Set<string> // tarefas com custo autorizado nesta sessão
   quoteOf: Map<string, string> // tarefa → orçamento confirmado
+  expiresAt: Map<string, number> // tarefa → validade do orçamento
   chargeRisk: boolean
 }
 
@@ -60,7 +73,9 @@ function nextId(prefix: string) {
 
 // --- ganchos para os testes ---
 interface Hooks {
+  analyze?: (src: string) => Promise<PixelStats>
   provider?: ImageProvider
+  renderFormat?: (src: string, method: 'expanded' | 'reframed', offset: number) => Promise<string>
   rasterize?: (bytes: Uint8Array, mimeType: string) => Promise<Uint8Array>
   queue?: { baseDelayMs?: number; maxDelayMs?: number }
 }
@@ -159,14 +174,31 @@ async function authorize(
   if (!(await useFlowStore.getState().confirmCost(title, quote))) {
     return { ok: false, cancelled: true, error: 'Geração cancelada: nenhuma chamada paga foi feita.' }
   }
+  if (!(Date.parse(quote.expiresAt) > Date.now())) {
+    return { ok: false, error: 'O orçamento venceu antes da confirmação. Nenhuma chamada foi feita — peça de novo.' }
+  }
   const engine = ensureEngine(projectId, provider)
   engine.chargeRisk = quote.paid
+  const expires = Date.parse(quote.expiresAt)
   for (const t of tasks) {
     engine.authorized.add(t.id)
     engine.quoteOf.set(t.id, quote.quoteId)
+    engine.expiresAt.set(t.id, Number.isFinite(expires) ? expires : 0)
   }
   return { ok: true, quote }
 }
+
+// Autorização VÁLIDA para esta tarefa: o provedor simulado do navegador é
+// grátis; os outros exigem um orçamento confirmado nesta sessão, para esta
+// tarefa, e ainda dentro da validade. Conferido ao escolher a próxima tarefa
+// E de novo dentro da execução, imediatamente antes da chamada.
+function isAuthorized(engine: Engine, taskId: string, now = Date.now()): boolean {
+  if (!engine.provider.quoteBatch) return true
+  const expires = engine.expiresAt.get(taskId) ?? 0
+  return engine.authorized.has(taskId) && !!engine.quoteOf.get(taskId) && expires > now
+}
+
+const NOT_AUTHORIZED = 'Imagem sem autorização de custo válida: nenhuma chamada foi feita. Peça um novo orçamento (Retomar).'
 
 // --- execução de uma tarefa ---
 
@@ -247,6 +279,7 @@ async function executeTask(projectId: string, taskId: string, token: string): Pr
   const run = runOf(projectId)
   const task = run?.tasks.find((t) => t.id === taskId)
   if (!engine || !run || !task) return
+  if (!isAuthorized(engine, taskId)) throw new ProviderError(NOT_AUTHORIZED, { code: 'not_authorized' })
   const runId = run.id
 
   // reserva o id do arquivo e grava "gerando" ANTES da chamada: se o app
@@ -258,6 +291,8 @@ async function executeTask(projectId: string, taskId: string, token: string): Pr
   const { inputs, resolved } = await resolveReferences(projectId, task, engine.provider)
   const settings = run.settings
   const deferred = task.references.filter((r) => r.deferred).length
+  // a autorização pode ter vencido ou sido retirada enquanto as fotos carregavam
+  if (!isAuthorized(engine, taskId)) throw new ProviderError(NOT_AUTHORIZED, { code: 'not_authorized' })
   const [result] = await runGeneration({
     provider: engine.provider,
     config: { model: settings.model, size: settings.size, quality: settings.quality },
@@ -275,7 +310,6 @@ async function executeTask(projectId: string, taskId: string, token: string): Pr
 
   const { bytes, mimeType } = dataUrlToBytes(result.image.src)
   const size = readImageSize(bytes, mimeType)
-  const sizeOption = getSizeOption(settings.model, settings.size)
   const version: SceneImageVersion = {
     id: nextId('versao'),
     taskId,
@@ -297,11 +331,12 @@ async function executeTask(projectId: string, taskId: string, token: string): Pr
     characters: task.characters,
     sceneFingerprint: task.sceneFingerprint,
     format: {
+      method: isNineSixteen(size?.width, size?.height) ? 'native' : 'unadjusted',
       nativeWidth: size?.width ?? null,
       nativeHeight: size?.height ?? null,
       target: '9:16',
       cropped: false,
-      note: sizeOption?.crop ? FORMAT_NOTE : 'Formato nativo do modelo, sem recorte.',
+      note: describeFormat(isNineSixteen(size?.width, size?.height) ? 'native' : 'unadjusted', { nativeWidth: size?.width, nativeHeight: size?.height }),
     },
   }
 
@@ -358,6 +393,311 @@ async function executeTask(projectId: string, taskId: string, token: string): Pr
     },
     { prompts: false },
   )
+  await analyzeVersionPixels(projectId, task.sceneId, saved.id)
+  if (settings.autoExpand && saved.format.method === 'unadjusted') {
+    const r = await adjustFormat(projectId, task.sceneId, saved.id, 'expanded')
+    if (!r.ok) useStoryStore.setState({ issue: `Cena ${task.sceneNumber}: não foi possível criar a versão 9:16 expandida (${r.error}). A imagem original foi mantida.` })
+  }
+}
+
+// --- formato 9:16: versões derivadas (a original nunca é alterada) ---
+
+export function formatMethodOf(version: SceneImageVersion): FormatMethod {
+  return version.format.method ?? (isNineSixteen(version.width, version.height) ? 'native' : 'unadjusted')
+}
+
+async function versionBytes(version: SceneImageVersion): Promise<{ bytes: Uint8Array; mimeType: string } | undefined> {
+  if (version.assetId && persistent()) {
+    const asset = await repository.getAsset(version.assetId)
+    if (asset) return { bytes: new Uint8Array(asset.bytes), mimeType: asset.mimeType }
+  }
+  return version.src?.startsWith('data:') ? dataUrlToBytes(version.src) : undefined
+}
+
+export type AdjustResult = { ok: true; versionId: string; lossPercent?: number } | { ok: false; error: string; needsConfirmation?: boolean }
+
+// Cria a versão 9:16 de uma imagem: 'expanded' (inteira, sem corte) ou
+// 'reframed' (corte na posição escolhida; acima de MAX_REFRAME_LOSS só com
+// confirmação). A nova versão vira a oficial se a de origem era a oficial;
+// se a oficial estava APROVADA, a aprovação precisa ser refeita.
+export async function adjustFormat(
+  projectId: string,
+  sceneId: string,
+  versionId: string,
+  method: 'expanded' | 'reframed',
+  options: { offset?: number; confirmLoss?: boolean } = {},
+): Promise<AdjustResult> {
+  const scene = boardOf(projectId)?.scenes.find((s) => s.id === sceneId)
+  const source = scene?.images?.find((v) => v.id === versionId)
+  if (!scene || !source) return { ok: false, error: 'Imagem não encontrada.' }
+  if (formatMethodOf(source) !== 'unadjusted') return { ok: false, error: 'Esta imagem já está em 9:16.' }
+  const offset = options.offset ?? 0.5
+  let lossPercent: number | undefined
+  if (method === 'reframed') {
+    lossPercent = reframeRect(source.width ?? 1, source.height ?? 1, offset).lossPercent
+    if (lossPercent > MAX_REFRAME_LOSS && !options.confirmLoss) {
+      return { ok: false, needsConfirmation: true, error: `O reenquadramento cortaria ${lossPercent}% da imagem. Prefira expandir, ou confirme o corte.` }
+    }
+  }
+  const loaded = await versionBytes(source)
+  if (!loaded) return { ok: false, error: 'O arquivo da imagem não foi encontrado no armazenamento.' }
+  const src = bytesToDataUrl(loaded.bytes, loaded.mimeType)
+  let out: string
+  try {
+    out = hooks.renderFormat
+      ? await hooks.renderFormat(src, method, offset)
+      : method === 'expanded'
+        ? await expandToFrame(src, TARGET_WIDTH, TARGET_HEIGHT)
+        : await reframeToFrame(src, offset, TARGET_WIDTH, TARGET_HEIGHT)
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'falha ao ajustar a imagem' }
+  }
+  const { bytes, mimeType } = dataUrlToBytes(out)
+  const size = readImageSize(bytes, mimeType)
+  if (!isNineSixteen(size?.width, size?.height)) return { ok: false, error: 'O ajuste não resultou em 9:16 — nada foi salvo.' }
+  const scale = source.width ? containRect(source.width, source.height ?? 1).scale : undefined
+  const version: SceneImageVersion = {
+    ...source,
+    id: nextId('versao'),
+    assetId: undefined,
+    src: undefined,
+    unsaved: undefined,
+    review: undefined,
+    analysis: undefined,
+    derivedFrom: source.id,
+    mimeType,
+    width: size?.width ?? null,
+    height: size?.height ?? null,
+    byteLength: bytes.byteLength,
+    sha256: await sha256Hex(bytes),
+    createdAt: Date.now(),
+    format: {
+      method,
+      nativeWidth: source.width,
+      nativeHeight: source.height,
+      target: '9:16',
+      cropped: method === 'reframed',
+      ...(lossPercent !== undefined ? { lossPercent } : {}),
+      ...(method === 'expanded' && scale ? { scale: Math.round(scale * 1000) / 1000 } : {}),
+      note: describeFormat(method, { lossPercent, nativeWidth: source.width, nativeHeight: source.height }),
+    },
+  }
+  let saved: SceneImageVersion = { ...version, src: out, unsaved: true }
+  if (persistent()) {
+    try {
+      const assetId = nextId('asset')
+      await repository.putAsset({
+        id: assetId,
+        projectId,
+        kind: 'scene',
+        mimeType,
+        bytes: toArrayBuffer(bytes),
+        byteLength: bytes.byteLength,
+        width: size?.width,
+        height: size?.height,
+        createdAt: version.createdAt,
+        sha256: version.sha256,
+        sceneImage: { ...version, assetId },
+      })
+      saved = { ...version, assetId }
+    } catch (err) {
+      useStoryStore.setState({ issue: `A versão 9:16 não pôde ser salva no navegador: ${(err as Error).message}` })
+    }
+  }
+  story().mutate(
+    projectId,
+    (board) => {
+      const n = board.scenes.findIndex((s) => s.id === sceneId) + 1
+      if (n === 0) return board
+      const scenes = board.scenes.map((s) => {
+        if (s.id !== sceneId) return s
+        const wasOfficial = s.officialImageId === source.id
+        return {
+          ...s,
+          images: [...(s.images ?? []), saved],
+          officialImageId: wasOfficial ? saved.id : s.officialImageId,
+          imageApprovedAt: wasOfficial ? null : s.imageApprovedAt,
+        }
+      })
+      return log({ ...board, scenes }, `Cena ${n}: versão ${FORMAT_LABELS[method]} criada a partir da imagem ${source.width}×${source.height}.`)
+    },
+    { prompts: false },
+  )
+  await analyzeVersionPixels(projectId, sceneId, saved.id)
+  return { ok: true, versionId: saved.id, ...(lossPercent !== undefined ? { lossPercent } : {}) }
+}
+
+// --- análise dos pixels (indicadores técnicos) ---
+
+function updateVersion(projectId: string, sceneId: string, versionId: string, change: (v: SceneImageVersion) => SceneImageVersion) {
+  story().mutate(
+    projectId,
+    (board) => ({
+      ...board,
+      scenes: board.scenes.map((s) =>
+        s.id === sceneId ? { ...s, images: s.images?.map((v) => (v.id === versionId ? change(v) : v)) } : s,
+      ),
+    }),
+    { prompts: false },
+  )
+}
+
+export async function analyzeVersionPixels(projectId: string, sceneId: string, versionId: string): Promise<void> {
+  const board = boardOf(projectId)
+  const index = board?.scenes.findIndex((s) => s.id === sceneId) ?? -1
+  const scene = board?.scenes[index]
+  const version = scene?.images?.find((v) => v.id === versionId)
+  if (!board || !scene || !version) return
+  let analysis: ImageAnalysis
+  try {
+    const loaded = await versionBytes(version)
+    if (!loaded) throw new Error('arquivo não encontrado')
+    const stats = await (hooks.analyze ?? analyzeImage)(bytesToDataUrl(loaded.bytes, loaded.mimeType))
+    analysis = {
+      measuredAt: Date.now(),
+      width: stats.width,
+      height: stats.height,
+      aspectOk: isNineSixteen(stats.width, stats.height),
+      blank: stats.stdLuma < 3,
+      meanLuma: stats.meanLuma,
+      hash: stats.hash,
+    }
+    // cena anterior APROVADA com algum personagem em comum
+    const current = boardOf(projectId)!
+    for (let i = index - 1; i >= 0; i--) {
+      const prev = current.scenes[i]
+      const prevOfficial = officialVersion(prev)
+      if (!prev.imageApprovedAt || !prevOfficial?.analysis?.hash) continue
+      if (!prev.characterKeys.some((k) => scene.characterKeys.includes(k))) continue
+      analysis.similarToPrevious = { sceneNumber: i + 1, distance: hashDistance(stats.hash, prevOfficial.analysis.hash) }
+      break
+    }
+    // imagem quase idêntica à de outra cena
+    current.scenes.forEach((other, i) => {
+      if (analysis.duplicateOf || other.id === sceneId) return
+      const h = officialVersion(other)?.analysis?.hash
+      if (h && hashDistance(stats.hash, h) <= DUPLICATE_DISTANCE) analysis.duplicateOf = i + 1
+    })
+  } catch (err) {
+    analysis = {
+      measuredAt: Date.now(),
+      width: version.width ?? 0,
+      height: version.height ?? 0,
+      aspectOk: isNineSixteen(version.width, version.height),
+      blank: false,
+      meanLuma: 0,
+      hash: '',
+      unavailable: err instanceof Error ? err.message : 'falha na análise',
+    }
+  }
+  updateVersion(projectId, sceneId, versionId, (v) => ({ ...v, analysis }))
+}
+
+// --- revisão humana ---
+
+export type ReviewResult = { ok: true } | { ok: false; needsConfirmation?: boolean; error: string }
+
+export function reviewImage(projectId: string, sceneId: string, versionId: string, patch: Partial<Omit<ImageReview, 'status'>>) {
+  updateVersion(projectId, sceneId, versionId, (v) => ({ ...v, review: { ...(v.review ?? emptyReview()), ...patch } }))
+}
+
+// Aprova uma versão e a torna oficial. Se outra versão já estava aprovada
+// como oficial, exige confirmação explícita.
+export function approveVersion(projectId: string, sceneId: string, versionId: string, options: { confirmReplace?: boolean } = {}): ReviewResult {
+  const scene = boardOf(projectId)?.scenes.find((s) => s.id === sceneId)
+  if (!scene?.images?.some((v) => v.id === versionId)) return { ok: false, error: 'Imagem não encontrada.' }
+  if (scene.imageApprovedAt && scene.officialImageId !== versionId && !options.confirmReplace) {
+    return { ok: false, needsConfirmation: true, error: 'Já existe uma imagem oficial aprovada nesta cena. Confirme para trocar (a atual continua guardada).' }
+  }
+  const now = Date.now()
+  story().mutate(
+    projectId,
+    (board) => {
+      const n = board.scenes.findIndex((s) => s.id === sceneId) + 1
+      return log(
+        {
+          ...board,
+          scenes: board.scenes.map((s) =>
+            s.id !== sceneId
+              ? s
+              : {
+                  ...s,
+                  officialImageId: versionId,
+                  imageApprovedAt: now,
+                  images: s.images!.map((v) => (v.id === versionId ? { ...v, review: { ...(v.review ?? emptyReview()), status: 'approved' as const, reviewedAt: now } } : v)),
+                },
+          ),
+        },
+        `Imagem da cena ${n} aprovada na revisão.`,
+      )
+    },
+    { prompts: false },
+  )
+  return { ok: true }
+}
+
+// Rejeita uma versão (com os problemas marcados). Rejeitar a oficial já
+// aprovada exige confirmação; a imagem continua guardada.
+export function rejectVersion(
+  projectId: string,
+  sceneId: string,
+  versionId: string,
+  problems: ProblemTag[],
+  note = '',
+  options: { confirmApproved?: boolean } = {},
+): ReviewResult {
+  const scene = boardOf(projectId)?.scenes.find((s) => s.id === sceneId)
+  if (!scene?.images?.some((v) => v.id === versionId)) return { ok: false, error: 'Imagem não encontrada.' }
+  const isOfficialApproved = scene.officialImageId === versionId && !!scene.imageApprovedAt
+  if (isOfficialApproved && !options.confirmApproved) {
+    return { ok: false, needsConfirmation: true, error: 'Esta é a imagem oficial aprovada. Confirme para rejeitá-la.' }
+  }
+  const now = Date.now()
+  story().mutate(
+    projectId,
+    (board) => {
+      const n = board.scenes.findIndex((s) => s.id === sceneId) + 1
+      return log(
+        {
+          ...board,
+          scenes: board.scenes.map((s) =>
+            s.id !== sceneId
+              ? s
+              : {
+                  ...s,
+                  imageApprovedAt: s.officialImageId === versionId ? null : s.imageApprovedAt,
+                  images: s.images!.map((v) =>
+                    v.id === versionId ? { ...v, review: { ...(v.review ?? emptyReview()), status: 'rejected' as const, problems, note, reviewedAt: now } } : v,
+                  ),
+                },
+          ),
+        },
+        `Imagem da cena ${n} rejeitada${problems.length ? ` (${problems.length} problema(s))` : ''}.`,
+      )
+    },
+    { prompts: false },
+  )
+  return { ok: true }
+}
+
+// Expande para 9:16 todas as imagens oficiais que ainda não estão em 9:16.
+// Imagens APROVADAS ficam de fora (trocar exige decisão individual).
+export async function expandAllUnadjusted(projectId: string): Promise<{ done: number; skippedApproved: number; failed: string[] }> {
+  const board = boardOf(projectId)
+  const result = { done: 0, skippedApproved: 0, failed: [] as string[] }
+  if (!board) return result
+  for (const [i, scene] of board.scenes.entries()) {
+    const official = officialVersion(scene)
+    if (!official || formatMethodOf(official) !== 'unadjusted') continue
+    if (scene.imageApprovedAt) {
+      result.skippedApproved += 1
+      continue
+    }
+    const r = await adjustFormat(projectId, scene.id, official.id, 'expanded')
+    if (r.ok) result.done += 1
+    else result.failed.push(`Cena ${i + 1}: ${r.error}`)
+  }
+  return result
 }
 
 async function discardAsset(assetId: string) {
@@ -379,6 +719,7 @@ function ensureEngine(projectId: string, provider: ImageProvider): Engine {
     provider,
     authorized: new Set(),
     quoteOf: new Map(),
+    expiresAt: new Map(),
     chargeRisk: false,
     queue: null as unknown as GenerationQueue,
   }
@@ -388,7 +729,7 @@ function ensureEngine(projectId: string, provider: ImageProvider): Engine {
     execute: (taskId, token) => executeTask(projectId, taskId, token),
     classify: classifyGenerationError,
     concurrency: () => runOf(projectId)?.settings.concurrency ?? 1,
-    canStart: (taskId) => !provider.quoteBatch || engine.authorized.has(taskId),
+    canStart: (taskId) => isAuthorized(engine, taskId),
     chargeRisk: () => engine.chargeRisk,
     dependencyFailed: (_taskId, depId) => {
       const dep = runOf(projectId)?.tasks.find((t) => t.id === depId)
@@ -598,11 +939,23 @@ export function setOfficialImage(projectId: string, sceneId: string, versionId: 
 }
 
 export function approveSceneImage(projectId: string, sceneId: string) {
-  mutateScene(projectId, sceneId, (s) => approveImage(s), 'Imagem da cena {n} aprovada.')
+  const scene = boardOf(projectId)?.scenes.find((s) => s.id === sceneId)
+  if (scene?.officialImageId) approveVersion(projectId, sceneId, scene.officialImageId, { confirmReplace: true })
+  else mutateScene(projectId, sceneId, (s) => approveImage(s), 'Imagem da cena {n} aprovada.')
 }
 
 export function unapproveSceneImage(projectId: string, sceneId: string) {
-  mutateScene(projectId, sceneId, (s) => unapproveImage(s), 'Aprovação da imagem da cena {n} desfeita.')
+  mutateScene(
+    projectId,
+    sceneId,
+    (s) => {
+      const next = unapproveImage(s)
+      return next === s
+        ? s
+        : { ...next, images: next.images?.map((v) => (v.id === s.officialImageId && v.review?.status === 'approved' ? { ...v, review: { ...v.review, status: 'pending' as const } } : v)) }
+    },
+    'Aprovação da imagem da cena {n} desfeita.',
+  )
 }
 
 export function isQueueActive(projectId: string): boolean {
@@ -614,13 +967,6 @@ export function hasOfficialImages(board: Storyboard): boolean {
   return board.scenes.some((s) => !!officialVersion(s))
 }
 
-// Projeto apagado: para a fila e esquece o storyboard em memória.
-export function stopProject(projectId: string) {
-  engines.get(projectId)?.queue.stop()
-  engines.delete(projectId)
-  story().forget(projectId)
-}
-
 // Só testes: esquece filas e autorizações (como ao recarregar a página).
 export function resetBatchControllerForTests() {
   for (const e of engines.values()) e.queue.stop()
@@ -628,8 +974,12 @@ export function resetBatchControllerForTests() {
   hooks = {}
 }
 
-useFlowStore.subscribe((state, previous) => {
-  if (state.flows === previous.flows) return
-  const ids = new Set(state.flows.map((f) => f.id))
-  for (const f of previous.flows) if (!ids.has(f.id)) stopProject(f.id)
+// projeto apagado (o aviso vem do store da historinha, que está sempre carregado)
+onProjectRemoved((projectId) => {
+  engines.get(projectId)?.queue.stop()
+  engines.delete(projectId)
 })
+
+// Só testes: executa uma tarefa diretamente (para provar que a própria
+// execução recusa tarefas sem autorização, mesmo fora da fila).
+export const executeTaskForTests = executeTask

@@ -7,6 +7,10 @@ import type { Storyboard } from './types'
 // cena — só aparência, nunca acontecimento novo.
 
 const cache = new WeakMap<Storyboard, Map<string, string[]>>()
+const conflictCache = new WeakMap<Storyboard, Map<string, string[]>>()
+
+// palavras que indicam troca de roupa no texto da copy
+const CLOTHING_CHANGE = /\b(veste|vestiu|vestida|vestido|troca|trocou|tira|tirou|coloca|colocou|p[õo]e|p[ôo]s|roupa|uniforme|pijama|avental|casaco|jaqueta|camisa|blusa|saia|cal[çc]a)\b/i
 
 // Trecho do campo "figurino" que fala de um personagem ("Dona Maria: avental
 // azul; Seu João: camisa"); com um personagem só na cena, vale o texto todo.
@@ -69,4 +73,32 @@ export function buildVisualMemory(board: Storyboard): Map<string, string[]> {
 
   cache.set(board, memory)
   return memory
+}
+
+// Conflitos que precisam de atenção humana (avisos — nada é descartado):
+// roupa que muda sem a copy indicar mudança.
+export function visualConflicts(board: Storyboard): Map<string, string[]> {
+  const cached = conflictCache.get(board)
+  if (cached) return cached
+  const nameOf = new Map(board.characters.map((c) => [c.key, c.name]))
+  const outfits = new Map<string, { text: string; scene: number }>()
+  const result = new Map<string, string[]>()
+  board.scenes.forEach((scene, index) => {
+    const n = index + 1
+    const out: string[] = []
+    const alone = scene.characterKeys.length === 1
+    for (const key of scene.characterKeys) {
+      const name = nameOf.get(key)
+      if (!name) continue
+      const own = wardrobeFor(scene.wardrobe, name, alone)
+      const previous = outfits.get(key)
+      if (own && previous && normalizeForSearch(previous.text) !== normalizeForSearch(own) && !CLOTHING_CHANGE.test(scene.excerpt)) {
+        out.push(`A roupa de ${name} muda (cena ${previous.scene}: "${previous.text}"; aqui: "${own}") sem a copy indicar troca — confira.`)
+      }
+      if (own) outfits.set(key, { text: own, scene: n })
+    }
+    result.set(scene.id, out)
+  })
+  conflictCache.set(board, result)
+  return result
 }

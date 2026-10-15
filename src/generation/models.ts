@@ -2,21 +2,25 @@
 // qualidade) e os limites que a camada de geração respeita (quantas imagens
 // por chamada). Não depende de nenhum provedor — vale pro simulado e pro real.
 
-export type ImageModel = 'gpt-image-1.5' | 'gpt-image-1' | 'gpt-image-1-mini' | 'dall-e-3' | 'dall-e-2'
+export type ImageModel = 'gpt-image-2' | 'gpt-image-1.5' | 'gpt-image-1' | 'gpt-image-1-mini' | 'dall-e-3' | 'dall-e-2'
 
 export const MODEL_LABELS: Record<ImageModel, string> = {
-  'gpt-image-1.5': 'GPT Image 1.5 (recomendado)',
+  'gpt-image-2': 'GPT Image 2 (9:16 nativo)',
+  'gpt-image-1.5': 'GPT Image 1.5',
   'gpt-image-1': 'GPT Image 1',
   'gpt-image-1-mini': 'GPT Image 1 Mini (rápido e barato)',
-  'dall-e-3': 'DALL-E 3',
-  'dall-e-2': 'DALL-E 2',
+  'dall-e-3': 'DALL-E 3 (descontinuado pela OpenAI)',
+  'dall-e-2': 'DALL-E 2 (descontinuado pela OpenAI)',
 }
 
 export interface SizeOption {
   value: string // tamanho enviado pra API, ex. "1024x1536"
   label: string
   aspect: number // proporção final (largura / altura) mostrada/baixada
-  crop?: boolean // se true, a API não gera nesse formato exato — recortamos no centro depois
+  // se true, a API não gera nesse formato exato: a imagem vem no formato
+  // mais próximo e é ENQUADRADA (inteira, com bordas preenchidas) — nunca
+  // recortada às cegas
+  crop?: boolean
 }
 
 export interface QualityOption {
@@ -27,8 +31,21 @@ export interface QualityOption {
 // gpt-image-1, 1.5 e mini têm a mesma grade de tamanhos/qualidade.
 const GPT_IMAGE_SIZES: SizeOption[] = [
   { value: '1024x1024', label: 'Quadrada (1:1)', aspect: 1 },
-  { value: '1024x1536', label: 'Vertical (9:16)', aspect: 9 / 16, crop: true },
-  { value: '1536x1024', label: 'Horizontal (16:9)', aspect: 16 / 9, crop: true },
+  { value: '1024x1536', label: 'Vertical (9:16, a partir de 2:3 sem corte)', aspect: 9 / 16, crop: true },
+  { value: '1536x1024', label: 'Horizontal (16:9, a partir de 3:2 sem corte)', aspect: 16 / 9, crop: true },
+]
+
+// gpt-image-2: tamanhos livres (múltiplos de 16, proporção entre 1:3 e 3:1),
+// conferido no SDK oficial (openai-python, image_generate_params.py e
+// image_edit_params.py, out/2026). 1080x1920 não é aceito (1080 não é
+// múltiplo de 16); 1152x2048 é 9:16 exato e reduz sem distorção para 1080x1920.
+const GPT_IMAGE_2_SIZES: SizeOption[] = [
+  { value: '1024x1024', label: 'Quadrada (1:1)', aspect: 1 },
+  { value: '1152x2048', label: 'Vertical 9:16 nativo (1152×2048)', aspect: 9 / 16 },
+  { value: '1008x1792', label: 'Vertical 9:16 nativo menor (1008×1792)', aspect: 9 / 16 },
+  { value: '1024x1536', label: 'Retrato 2:3 (1024×1536)', aspect: 2 / 3 },
+  { value: '2048x1152', label: 'Horizontal 16:9 nativo (2048×1152)', aspect: 16 / 9 },
+  { value: '1536x1024', label: 'Paisagem 3:2 (1536×1024)', aspect: 3 / 2 },
 ]
 
 const GPT_IMAGE_QUALITIES: QualityOption[] = [
@@ -39,6 +56,7 @@ const GPT_IMAGE_QUALITIES: QualityOption[] = [
 ]
 
 export const MODEL_SIZES: Record<ImageModel, SizeOption[]> = {
+  'gpt-image-2': GPT_IMAGE_2_SIZES,
   'gpt-image-1.5': GPT_IMAGE_SIZES,
   'gpt-image-1': GPT_IMAGE_SIZES,
   'gpt-image-1-mini': GPT_IMAGE_SIZES,
@@ -55,6 +73,7 @@ export const MODEL_SIZES: Record<ImageModel, SizeOption[]> = {
 }
 
 export const MODEL_QUALITIES: Record<ImageModel, QualityOption[] | null> = {
+  'gpt-image-2': GPT_IMAGE_QUALITIES,
   'gpt-image-1.5': GPT_IMAGE_QUALITIES,
   'gpt-image-1': GPT_IMAGE_QUALITIES,
   'gpt-image-1-mini': GPT_IMAGE_QUALITIES,
@@ -67,6 +86,7 @@ export const MODEL_QUALITIES: Record<ImageModel, QualityOption[] | null> = {
 
 // Quantas imagens cada modelo aceita gerar numa única chamada da API.
 export const MODEL_MAX_N: Record<ImageModel, number> = {
+  'gpt-image-2': 10,
   'gpt-image-1.5': 10,
   'gpt-image-1': 10,
   'gpt-image-1-mini': 10,
@@ -77,6 +97,7 @@ export const MODEL_MAX_N: Record<ImageModel, number> = {
 // Tamanho máximo do prompt aceito por cada modelo (caracteres), conforme a
 // documentação da API. O backend recusa prompts maiores antes de chamar a API.
 export const MODEL_PROMPT_LIMITS: Record<ImageModel, number> = {
+  'gpt-image-2': 32000,
   'gpt-image-1.5': 32000,
   'gpt-image-1': 32000,
   'gpt-image-1-mini': 32000,

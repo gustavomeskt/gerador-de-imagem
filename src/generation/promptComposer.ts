@@ -131,6 +131,10 @@ export function composePrompt(input: ComposeInput): string {
     )
   }
 
+  if (continuity.length && cast.length) {
+    out.push('Identity priority: the character photos come first, then the character sheets. If an earlier-scene image disagrees with a character photo, the character photo wins.')
+  }
+
   if (style) {
     out.push('Project style guide:')
     out.push(...styleLines(style))

@@ -4,10 +4,14 @@ import { officialVersion } from '../../batch/planner'
 import { IMAGE_STATE_LABELS, type SceneImageState } from '../../batch/types'
 import { isOutdated, sceneImageState, taskForScene } from '../../batch/versions'
 import { exportProjectZip } from '../../export/exportProject'
-import { cancelPending, pauseBatch, resumeBatch, retryFailed } from '../../store/batchController'
+import { cancelPending, expandAllUnadjusted, pauseBatch, resumeBatch, retryFailed } from '../../store/batchController'
 import type { Storyboard, StoryScene } from '../../story/types'
 import BatchDialog from './BatchDialog'
-import { SceneImageActions, SceneImagePanel, VersionThumb } from './SceneImage'
+import ImageReviewDialog from './ImageReviewDialog'
+import { FormatBadge, SceneImageActions, VersionThumb } from './SceneImage'
+import { formatMethodOf } from '../../store/batchController'
+
+type Filter = 'all' | 'review' | 'approved' | 'rejected' | 'not916' | 'failed'
 
 type Notify = (text: string, error?: boolean) => void
 
@@ -44,6 +48,7 @@ const ImageCard = memo(function ImageCard({
         <div className="ifs-image-card__head">
           <strong>Cena {number}</strong>
           <span className={`ifs-image-state ifs-image-state--${state}`}>{IMAGE_STATE_LABELS[state]}</span>
+          {official && <FormatBadge version={official} />}
           {(scene.images?.length ?? 0) > 1 && <small>{scene.images!.length} versões</small>}
         </div>
         <small className="ifs-image-card__names">{names || 'sem personagens'}</small>
@@ -52,14 +57,15 @@ const ImageCard = memo(function ImageCard({
         {task?.error && (task.status === 'failed' || task.status === 'pending') && (
           <small className={task.status === 'failed' ? 'ifs-image-error' : 'ifs-image-retry'}>{task.error}</small>
         )}
-        <SceneImageActions board={board} scene={scene} number={number} onMessage={onMessage} />
+        <SceneImageActions board={board} scene={scene} number={number} onMessage={onMessage} onReview={official ? () => onOpen(scene.id) : undefined} />
       </div>
     </li>
   )
 })
 
 export default function StoryImagesTab({ board, onMessage }: { board: Storyboard; onMessage: Notify }) {
-  const [dialog, setDialog] = useState(false)
+  const [dialog, setDialog] = useState<null | 'all' | 'rejected'>(null)
+  const [filter, setFilter] = useState<Filter>('all')
   const [openId, setOpenId] = useState<string | null>(null)
   const [working, setWorking] = useState(false)
   const run = board.batch
@@ -74,6 +80,41 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
   const failed = tasks.filter((t) => t.status === 'failed' || t.status === 'cancelled').length
   const progress = tasks.length ? Math.round((finished / tasks.length) * 100) : 0
   const openIndex = board.scenes.findIndex((s) => s.id === openId)
+  const rejected = states.filter((st) => st === 'rejected').length
+  const notNineSixteen = board.scenes.filter((s) => {
+    const o = officialVersion(s)
+    return o && formatMethodOf(o) === 'unadjusted'
+  }).length
+  const matches = (scene: StoryScene, state: SceneImageState) => {
+    const o = officialVersion(scene)
+    switch (filter) {
+      case 'review':
+        return state === 'done'
+      case 'approved':
+        return state === 'approved'
+      case 'rejected':
+        return state === 'rejected'
+      case 'not916':
+        return !!o && formatMethodOf(o) === 'unadjusted'
+      case 'failed':
+        return state === 'failed' || state === 'cancelled'
+      default:
+        return true
+    }
+  }
+
+  async function expandAll() {
+    setWorking(true)
+    const r = await expandAllUnadjusted(board.projectId)
+    setWorking(false)
+    onMessage(
+      `${r.done} imagem(ns) expandida(s) para 9:16 (sem corte)` +
+        (r.skippedApproved ? `; ${r.skippedApproved} aprovada(s) ficaram como estão — ajuste uma a uma na revisão` : '') +
+        (r.failed.length ? `; falhas: ${r.failed.join(' ')}` : '') +
+        '.',
+      r.failed.length > 0,
+    )
+  }
 
   async function act(fn: () => Promise<{ ok: boolean; error?: string; cancelled?: boolean }>, okText: string) {
     setWorking(true)
@@ -90,7 +131,7 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
       const sb = manifest.storyboard
       onMessage(
         sb
-          ? `ZIP exportado: ${sb.imagesExported} de ${sb.sceneCount} cena(s) com imagem oficial${sb.simulatedImages ? ` (${sb.simulatedImages} simulada(s))` : ''}, prompts, copy e roteiro para o Google Flow.`
+          ? `ZIP exportado: ${sb.imagesExported} de ${sb.sceneCount} cena(s) com imagem oficial${sb.simulatedImages ? ` (${sb.simulatedImages} simulada(s))` : ''}; ${sb.readyForAnimation} pronta(s) para animar (reais, aprovadas e 9:16). Inclui prompts, copy, histórico e roteiro para o Google Flow.`
           : 'ZIP exportado.',
       )
     } catch (err) {
@@ -107,9 +148,19 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
   return (
     <div className="ifs-images">
       <div className="ifs-images__bar">
-        <button type="button" className="ifs-btn-primary" onClick={() => setDialog(true)} disabled={pending + running > 0}>
+        <button type="button" className="ifs-btn-primary" onClick={() => setDialog('all')} disabled={pending + running > 0}>
           <Images size={14} /> Gerar todas as imagens
         </button>
+        {rejected > 0 && (
+          <button type="button" className="ifs-btn-secondary" onClick={() => setDialog('rejected')} disabled={pending + running > 0}>
+            <RotateCcw size={14} /> Regenerar só as rejeitadas ({rejected})
+          </button>
+        )}
+        {notNineSixteen > 0 && (
+          <button type="button" className="ifs-btn-secondary" onClick={expandAll} disabled={working} title="Cria a versão 9:16 com a imagem inteira, sem corte">
+            Expandir para 9:16 as que faltam ({notNineSixteen})
+          </button>
+        )}
         {run && (run.state === 'running' && (pending > 0 || running > 0) ? (
           <button type="button" className="ifs-btn-secondary" onClick={() => pauseBatch(board.projectId)}>
             <Pause size={14} /> Pausar
@@ -147,6 +198,16 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
           </span>
         </div>
       )}
+      <div className="ifs-images__filter">
+        <select value={filter} onChange={(e) => setFilter(e.target.value as Filter)} aria-label="Filtrar imagens">
+          <option value="all">Todas as cenas</option>
+          <option value="review">A revisar (concluídas, não aprovadas)</option>
+          <option value="approved">Aprovadas</option>
+          <option value="rejected">Rejeitadas</option>
+          <option value="not916">Ainda não estão em 9:16</option>
+          <option value="failed">Com falha</option>
+        </select>
+      </div>
       <p className="ifs-images__counts">
         {(Object.keys(IMAGE_STATE_LABELS) as SceneImageState[])
           .filter((s) => counts[s])
@@ -155,7 +216,7 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
       </p>
 
       <ol className="ifs-images__grid">
-        {board.scenes.map((scene, i) => (
+        {board.scenes.map((scene, i) => !matches(scene, states[i]) ? null : (
           <ImageCard
             key={scene.id}
             board={board}
@@ -169,22 +230,11 @@ export default function StoryImagesTab({ board, onMessage }: { board: Storyboard
         ))}
       </ol>
 
-      {openIndex >= 0 && (
-        <div className="ifs-dialog-backdrop" onClick={() => setOpenId(null)}>
-          <div className="ifs-dialog ifs-dialog--wide" role="dialog" aria-modal="true" aria-label={`Cena ${openIndex + 1}`} onClick={(e) => e.stopPropagation()}>
-            <div className="ifs-dialog__header">
-              <h2>Cena {openIndex + 1}</h2>
-              <button type="button" className="ifs-dialog__close" onClick={() => setOpenId(null)} title="Fechar">
-                <XCircle size={16} />
-              </button>
-            </div>
-            <blockquote className="ifs-images__quote">{board.scenes[openIndex].excerpt}</blockquote>
-            <SceneImagePanel board={board} scene={board.scenes[openIndex]} number={openIndex + 1} onMessage={onMessage} />
-          </div>
-        </div>
+      {openIndex >= 0 && officialVersion(board.scenes[openIndex]) && (
+        <ImageReviewDialog board={board} scene={board.scenes[openIndex]} number={openIndex + 1} onClose={() => setOpenId(null)} onMessage={onMessage} />
       )}
 
-      {dialog && <BatchDialog board={board} onClose={() => setDialog(false)} onDone={(r) => (r.ok ? onMessage(`${r.images} imagem(ns) na fila${r.simulated ? ' — SIMULADAS (fictícias)' : ''}.`) : onMessage(r.error, !r.cancelled))} />}
+      {dialog && <BatchDialog board={board} initialScope={dialog} onClose={() => setDialog(null)} onDone={(r) => (r.ok ? onMessage(`${r.images} imagem(ns) na fila${r.simulated ? ' — SIMULADAS (fictícias)' : ''}.`) : onMessage(r.error, !r.cancelled))} />}
     </div>
   )
 }

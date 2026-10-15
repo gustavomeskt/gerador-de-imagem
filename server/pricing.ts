@@ -40,8 +40,32 @@ const GPT_IMAGE_1: Record<string, Record<string, number>> = {
   high: { '1024x1024': 0.167, '1024x1536': 0.25, '1536x1024': 0.25 },
 }
 
+// gpt-image-2: o preço não pôde ser conferido na documentação oficial a
+// partir deste ambiente. Usamos o MAIOR valor público encontrado para
+// 1024x1536 (baixa 0,01 / média 0,05 / alta 0,17 US$) e escalamos pela área.
+const GPT_IMAGE_2_BASE = { low: 0.01, medium: 0.05, high: 0.17 }
+const GPT_IMAGE_2_AREA: Record<string, number> = {
+  '1024x1024': (1024 * 1024) / (1024 * 1536),
+  '1024x1536': 1,
+  '1536x1024': 1,
+  '1152x2048': (1152 * 2048) / (1024 * 1536),
+  '2048x1152': (1152 * 2048) / (1024 * 1536),
+  '1008x1792': (1008 * 1792) / (1024 * 1536),
+}
+const GPT_IMAGE_2: Record<string, Record<string, number>> = Object.fromEntries(
+  (['low', 'medium', 'high'] as const).map((q) => [
+    q,
+    Object.fromEntries(Object.entries(GPT_IMAGE_2_AREA).map(([size, f]) => [size, Math.ceil(GPT_IMAGE_2_BASE[q] * f * 1000) / 1000])),
+  ]),
+)
+
+// modelos que não deixam escolher input_fidelity: as referências são orçadas
+// como fidelidade alta (pior caso)
+const ALWAYS_HIGH_FIDELITY = new Set(['gpt-image-2'])
+
 export const DEFAULT_PRICES: PriceTable = {
   images: {
+    'gpt-image-2': GPT_IMAGE_2,
     // gpt-image-1.5: estimado com os valores do gpt-image-1 (limite superior)
     'gpt-image-1.5': GPT_IMAGE_1,
     'gpt-image-1': GPT_IMAGE_1,
@@ -58,9 +82,9 @@ export const DEFAULT_PRICES: PriceTable = {
       standard: { '256x256': 0.016, '512x512': 0.018, '1024x1024': 0.02 },
     },
   },
-  imagePromptPerMTokens: { 'gpt-image-1.5': 5, 'gpt-image-1': 5, 'gpt-image-1-mini': 2 },
+  imagePromptPerMTokens: { 'gpt-image-2': 5, 'gpt-image-1.5': 5, 'gpt-image-1': 5, 'gpt-image-1-mini': 2 },
   // gpt-image-1.5 orçado com o valor do gpt-image-1 (limite superior)
-  imageInputPerMTokens: { 'gpt-image-1.5': 10, 'gpt-image-1': 10, 'gpt-image-1-mini': 2.5 },
+  imageInputPerMTokens: { 'gpt-image-2': 10, 'gpt-image-1.5': 10, 'gpt-image-1': 10, 'gpt-image-1-mini': 2.5 },
   referenceTokens: { base: 1000, highFidelityExtra: 6240 },
   enhancer: { inputPerMTokens: 0.25, outputPerMTokens: 2 },
   story: {
@@ -137,18 +161,22 @@ export function estimateImageJob(
   const refs = job.references ?? []
   if (refs.length > 0) {
     const calls = Math.ceil(job.totalImages / MODEL_MAX_N[job.model])
-    const perImage = prices.referenceTokens.base + (job.inputFidelity === 'high' ? prices.referenceTokens.highFidelityExtra : 0)
+    const highFidelity = job.inputFidelity === 'high' || ALWAYS_HIGH_FIDELITY.has(job.model)
+    const perImage = prices.referenceTokens.base + (highFidelity ? prices.referenceTokens.highFidelityExtra : 0)
     const rate = prices.imageInputPerMTokens[job.model] ?? 0
     const refCost = (refs.length * perImage * calls * rate) / 1_000_000
     total += refCost
     breakdown.push(
       `${refs.length} referência(s) × ~${perImage} tokens × ${calls} chamada(s)` +
-        `${job.inputFidelity === 'high' ? ' (fidelidade alta)' : ''} = ${usd(refCost)}`,
+        `${highFidelity ? ' (fidelidade alta)' : ''} = ${usd(refCost)}`,
     )
     notes.push('Referências orçadas pelo limite superior de tokens por imagem; o valor real tende a ser menor.')
   }
   if (!job.quality || job.quality === 'auto') notes.push('Qualidade "auto" foi orçada como "high" (pior caso).')
   if (job.model === 'gpt-image-1.5') notes.push('gpt-image-1.5 orçado com a tabela do gpt-image-1 (limite superior).')
+  if (job.model === 'gpt-image-2') {
+    notes.push('gpt-image-2: preço NÃO confirmado na documentação oficial — orçado pelo maior valor público encontrado, proporcional à área da imagem.')
+  }
 
   return { usd: total, breakdown, notes }
 }
@@ -241,5 +269,8 @@ export function estimateBatch(
   const notes = [`Estimativa com preços de referência (${PRICES_REFERENCE_DATE}); a cobrança real é a da fatura da OpenAI.`]
   if (!job.quality || job.quality === 'auto') notes.push('Qualidade "auto" foi orçada como "high" (pior caso).')
   if (refsTotal) notes.push('Referências orçadas pelo limite superior de tokens por imagem; o valor real tende a ser menor.')
+  if (job.model === 'gpt-image-2') {
+    notes.push('gpt-image-2: preço NÃO confirmado na documentação oficial — orçado pelo maior valor público encontrado, proporcional à área da imagem.')
+  }
   return { usd: total, breakdown, notes, perItem }
 }

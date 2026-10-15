@@ -49,6 +49,7 @@ export function sceneFingerprint(scene: StoryScene, board: Storyboard): string {
     JSON.stringify([
       scene.excerpt, cast, scene.speakerKey, scene.dialogue, scene.environment, scene.action, scene.emotions, scene.wardrobe,
       scene.objects, scene.timeShift, scene.continuity, scene.framing, scene.camera, scene.visualDescription, scene.promptOverride ?? '',
+      scene.positions ?? '',
     ]),
   )
 }
@@ -110,9 +111,10 @@ export function planBatch(params: {
     const inScope =
       scope === 'all' ||
       (scope === 'pending' && !officialVersion(scene)) ||
+      (scope === 'rejected' && officialVersion(scene)?.review?.status === 'rejected' && !scene.imageApprovedAt) ||
       ((scope === 'selected' || scope === 'single') && selected.has(scene.id))
     if (!inScope) {
-      report.reason = scope === 'pending' ? 'já tem imagem' : 'não selecionada'
+      report.reason = scope === 'pending' ? 'já tem imagem' : scope === 'rejected' ? 'imagem não rejeitada' : 'não selecionada'
       return
     }
     if (scene.status !== 'approved') {

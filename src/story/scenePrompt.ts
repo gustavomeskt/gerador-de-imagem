@@ -4,7 +4,7 @@ import { allocateCharacterPhotos } from '../generation/referencePlan'
 import { DEFAULT_MAX_REFERENCES } from '../generation/references'
 import { defaultStyleGuide, type StyleGuide } from '../generation/styleGuide'
 import type { Storyboard, StoryScene } from './types'
-import { buildVisualMemory } from './visualMemory'
+import { buildVisualMemory, visualConflicts } from './visualMemory'
 
 // Prompt automático de cada cena do storyboard. Reaproveita o compositor da
 // Etapa 4 (ficha permanente dos personagens + fotos + guia de estilo) e
@@ -41,8 +41,12 @@ export interface ScenePlan extends ScenePromptResult {
 
 function lines(scene: StoryScene, names: (keys: string[]) => string[], extraPeople: string[], memory: string[]): string {
   const speaker = scene.speakerKey ? names([scene.speakerKey])[0] : ''
+  const everyone = names(scene.characterKeys)
   const out = [
     `Action: ${scene.action}`,
+    everyone.length > 0 &&
+      `People in this image: exactly ${everyone.length} main ${everyone.length === 1 ? 'person' : 'people'} (${everyone.join(', ')}), each one shown once. Do not add other recognizable people.`,
+    scene.positions?.trim() && `Positions in the frame (left to right): ${scene.positions.trim()}`,
     scene.environment && `Setting: ${scene.environment}`,
     speaker && scene.dialogue && `${speaker} is speaking (show it through facial expression and gesture only — no speech balloons, no text).`,
     scene.emotions && `Facial expressions / emotions: ${scene.emotions}`,
@@ -95,12 +99,28 @@ export function planScene(
     castKeys.push(key)
   }
   if (unregistered.length) warnings.push(`Sem cadastro na biblioteca (vão sem foto): ${unregistered.join(', ')}.`)
+  // duas pessoas da cena ligadas à MESMA ficha: os rostos se misturariam
+  const libIds = scene.characterKeys.map((k) => byKey.get(k)?.libraryId).filter((id): id is string => !!id)
+  const dup = libIds.find((id, i) => libIds.indexOf(id) !== i)
+  if (dup) {
+    const who = scene.characterKeys.filter((k) => byKey.get(k)?.libraryId === dup).map((k) => byKey.get(k)!.name)
+    blocking.push(`${who.join(' e ')} estão associados à mesma ficha da biblioteca — corrija na aba Personagens para não misturar rostos.`)
+  }
+  warnings.push(...(visualConflicts(board).get(scene.id) ?? []))
   if (deleted.length) {
     warnings.push(`Associados a personagem excluído da biblioteca: ${deleted.join(', ')}.`)
     blocking.push(`Personagem excluído da biblioteca: ${deleted.join(', ')} — associe outro ou retire da cena.`)
   }
 
   const castPhotos = cast.map((c) => orderedPhotos(c).filter((p) => !p.missing))
+  const seen = new Map<string, string>()
+  cast.forEach((c, i) => {
+    for (const p of castPhotos[i]) {
+      const other = seen.get(p.sha256)
+      if (other && other !== c.name) warnings.push(`${other} e ${c.name} usam a mesma foto — as identidades podem se misturar.`)
+      seen.set(p.sha256, c.name)
+    }
+  })
   cast.forEach((c, i) => {
     if (castPhotos[i].length === 0) blocking.push(`As fotos de ${c.name} não foram encontradas no armazenamento — edite o personagem.`)
   })

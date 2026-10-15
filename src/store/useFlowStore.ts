@@ -546,7 +546,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
     const hasImages = cast.length > 0 || refPhotos > 0
     if (hasImages && !supportsReferences(model)) {
       return {
-        error: `${MODEL_LABELS[model]} não aceita imagens de referência. Escolha GPT Image 1.5, GPT Image 1 ou GPT Image 1 Mini, ou retire personagens e referências.`,
+        error: `${MODEL_LABELS[model]} não aceita imagens de referência. Escolha GPT Image 2, 1.5, 1 ou 1 Mini, ou retire personagens e referências.`,
       }
     }
 

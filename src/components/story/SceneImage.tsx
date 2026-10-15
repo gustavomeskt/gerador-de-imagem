@@ -4,7 +4,9 @@ import { officialVersion } from '../../batch/planner'
 import { IMAGE_STATE_LABELS, type SceneImageVersion } from '../../batch/types'
 import { isOutdated, sceneImageState, taskForScene } from '../../batch/versions'
 import { extensionFor } from '../../lib/binary'
-import { approveSceneImage, regenerateScene, setOfficialImage, unapproveSceneImage } from '../../store/batchController'
+import { FORMAT_LABELS } from '../../batch/format'
+import { approveSceneImage, formatMethodOf, regenerateScene, unapproveSceneImage } from '../../store/batchController'
+import ImageReviewDialog from './ImageReviewDialog'
 import type { Storyboard, StoryScene } from '../../story/types'
 import { useAssetSrc } from './useAssetSrc'
 
@@ -51,11 +53,13 @@ export function SceneImageActions({
   scene,
   number,
   onMessage,
+  onReview,
 }: {
   board: Storyboard
   scene: StoryScene
   number: number
   onMessage: (text: string, error?: boolean) => void
+  onReview?: () => void
 }) {
   const official = officialVersion(scene)
   const state = sceneImageState(scene, board.batch)
@@ -85,86 +89,85 @@ export function SceneImageActions({
             <Check size={14} /> Aprovar imagem
           </button>
         ))}
+      {official && onReview && (
+        <button type="button" className="ifs-btn-secondary" onClick={onReview}>
+          Revisar e comparar
+        </button>
+      )}
       {official && <DownloadButton version={official} number={number} />}
     </div>
   )
 }
 
-// Painel completo: imagem oficial, estado, erro, versões e comparação.
+// Painel da imagem da cena: oficial, estado, formato, revisão e versões.
 export function SceneImagePanel({ board, scene, number, onMessage }: { board: Storyboard; scene: StoryScene; number: number; onMessage: (text: string, error?: boolean) => void }) {
   const official = officialVersion(scene)
   const state = sceneImageState(scene, board.batch)
   const task = taskForScene(board.batch, scene.id)
   const versions = scene.images ?? []
-  const [compareId, setCompareId] = useState<string | null>(null)
-  const compare = versions.find((v) => v.id === compareId && v.id !== official?.id)
+  const [reviewing, setReviewing] = useState<string | null>(null)
 
   return (
     <div className="ifs-scene-image" data-testid="scene-image-panel">
       <div className="ifs-scene-image__head">
         <h4>Imagem da cena</h4>
         <span className={`ifs-image-state ifs-image-state--${state}`}>{IMAGE_STATE_LABELS[state]}</span>
+        {official && <FormatBadge version={official} />}
         {official && isOutdated(scene, board) && <span className="ifs-image-warn">cena editada depois desta imagem</span>}
       </div>
       {task?.error && (task.status === 'failed' || task.status === 'pending') && (
         <p className={task.status === 'failed' ? 'ifs-image-error' : 'ifs-image-retry'}>{task.error}</p>
       )}
-      <div className={compare ? 'ifs-scene-image__compare' : 'ifs-scene-image__single'}>
+      <div className="ifs-scene-image__single">
         <figure>
-          <VersionThumb version={official} alt={`Cena ${number} — imagem oficial`} className="ifs-thumb--large" />
+          <button type="button" className="ifs-scene-image__open" onClick={() => official && setReviewing(official.id)} disabled={!official} title="Revisar e comparar">
+            <VersionThumb version={official} alt={`Cena ${number} — imagem oficial`} className="ifs-thumb--large" />
+          </button>
           {official && (
             <figcaption>
-              <Star size={12} /> Oficial{scene.imageApprovedAt ? ' · aprovada' : ' · não aprovada'} · {official.model} · {official.width}×{official.height}
+              <Star size={12} /> Oficial{scene.imageApprovedAt ? ' · aprovada' : official.review?.status === 'rejected' ? ' · rejeitada' : ' · não aprovada'} · {official.model} · {official.width}×{official.height}
             </figcaption>
           )}
         </figure>
-        {compare && (
-          <figure>
-            <VersionThumb version={compare} alt={`Cena ${number} — versão para comparar`} className="ifs-thumb--large" />
-            <figcaption>
-              Versão de {new Date(compare.createdAt).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' })}{' '}
-              <button
-                type="button"
-                className="ifs-btn-secondary"
-                onClick={() => {
-                  if (!scene.imageApprovedAt || window.confirm('A imagem oficial atual está aprovada. Trocar pela versão escolhida? (A atual continua guardada.)')) {
-                    setOfficialImage(board.projectId, scene.id, compare.id)
-                    setCompareId(null)
-                  }
-                }}
-              >
-                Tornar oficial
-              </button>
-            </figcaption>
-          </figure>
-        )}
       </div>
       {official && (
         <p className="ifs-scene-image__note">
-          {official.simulated ? 'Imagem SIMULADA (fictícia, sem IA). ' : ''}
+          {official.simulated ? 'Imagem SIMULADA (fictícia, sem IA) — não serve para animação. ' : ''}
           {official.format.note}
         </p>
       )}
-      <SceneImageActions board={board} scene={scene} number={number} onMessage={onMessage} />
+      <SceneImageActions board={board} scene={scene} number={number} onMessage={onMessage} onReview={official ? () => setReviewing(official.id) : undefined} />
       {versions.length > 1 && (
         <div className="ifs-scene-image__versions">
-          <span>Versões ({versions.length}) — clique para comparar com a oficial:</span>
+          <span>Versões ({versions.length}) — clique para revisar e comparar:</span>
           <div>
             {versions.map((v, i) => (
               <button
                 type="button"
                 key={v.id}
-                className={v.id === official?.id ? 'ifs-version ifs-version--official' : v.id === compareId ? 'ifs-version ifs-version--compare' : 'ifs-version'}
-                onClick={() => setCompareId(v.id === official?.id ? null : v.id)}
-                title={v.id === official?.id ? 'Versão oficial' : 'Comparar com a oficial'}
+                className={v.id === official?.id ? 'ifs-version ifs-version--official' : v.review?.status === 'rejected' ? 'ifs-version ifs-version--rejected' : 'ifs-version'}
+                onClick={() => setReviewing(v.id)}
+                title={v.id === official?.id ? 'Versão oficial' : 'Revisar esta versão'}
               >
                 <VersionThumb version={v} alt={`Versão ${i + 1}`} />
-                <small>v{i + 1}{v.id === official?.id ? ' ★' : ''}</small>
+                <small>
+                  v{i + 1}
+                  {v.id === official?.id ? ' ★' : ''}
+                  {v.review?.status === 'rejected' ? ' ✗' : v.review?.status === 'approved' ? ' ✓' : ''}
+                </small>
               </button>
             ))}
           </div>
         </div>
       )}
+      {reviewing && (
+        <ImageReviewDialog board={board} scene={scene} number={number} initialVersionId={reviewing} onClose={() => setReviewing(null)} onMessage={onMessage} />
+      )}
     </div>
   )
+}
+
+export function FormatBadge({ version }: { version: SceneImageVersion }) {
+  const method = formatMethodOf(version)
+  return <span className={`ifs-format ifs-format--${method}`} title={version.format.note}>{method === 'unadjusted' ? `${version.width}×${version.height} — não é 9:16` : FORMAT_LABELS[method].split(' (')[0]}</span>
 }

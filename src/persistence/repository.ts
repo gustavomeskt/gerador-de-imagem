@@ -128,6 +128,12 @@ export const repository = {
     })
   },
 
+  deleteStoryboard(id: string): Promise<void> {
+    return run('write', async () => {
+      await (await getDb()).delete('storyboards', id)
+    })
+  },
+
   getMeta<T>(key: string): Promise<T | undefined> {
     return run('read', async () => (await (await getDb()).get('meta', key))?.value as T | undefined)
   },

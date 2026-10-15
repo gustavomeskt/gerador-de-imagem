@@ -11,7 +11,7 @@ let currentDb: DbModule | null = null
 
 // Simula abrir o app do zero (como depois de atualizar a página): módulos,
 // filas e autorizações de custo recomeçam vazios; o banco continua.
-async function openApp() {
+async function openApp(options: { batch?: boolean } = {}) {
   await currentDb?.closeDbForTests()
   vi.resetModules()
   currentDb = await import('../../persistence/db')
@@ -19,7 +19,8 @@ async function openApp() {
   const flows = await import('../useFlowStore')
   const chars = await import('../useCharacterStore')
   const story = await import('../useStoryStore')
-  const batch = await import('../batchController')
+  // batch: false = como no app quando a tela de imagens nunca foi aberta
+  const batch = options.batch === false ? (null as unknown as typeof import('../batchController')) : await import('../batchController')
   await flows.useFlowStore.getState().hydrate()
   await chars.useCharacterStore.getState().hydrate()
   await story.useStoryStore.getState().hydrate()
@@ -34,7 +35,7 @@ interface Call {
   release: (fail?: unknown) => void
 }
 let seq = 0
-function fakeProvider(opts: { kind?: 'mock' | 'backend'; hold?: boolean; fail?: (req: ImageGenerationRequest, n: number) => unknown; paid?: boolean } = {}) {
+function fakeProvider(opts: { kind?: 'mock' | 'backend'; hold?: boolean; fail?: (req: ImageGenerationRequest, n: number) => unknown; paid?: boolean; expired?: boolean } = {}) {
   const calls: Call[] = []
   const quotes: BatchImageJob[] = []
   let active = 0
@@ -58,7 +59,9 @@ function fakeProvider(opts: { kind?: 'mock' | 'backend'; hold?: boolean; fail?: 
         active -= 1
       }
       seq += 1
-      return [{ src: bytesToDataUrl(pngBytes(1024, 1536, seq % 251), 'image/png'), mimeType: 'image/png' }]
+      // devolve no tamanho pedido (como a API)
+      const [w, h] = request.size.split('x').map(Number)
+      return [{ src: bytesToDataUrl(pngBytes(w, h, seq % 251), 'image/png'), mimeType: 'image/png' }]
     },
     async enhancePrompt(p) {
       return p
@@ -70,7 +73,7 @@ function fakeProvider(opts: { kind?: 'mock' | 'backend'; hold?: boolean; fail?: 
       const q: CostQuote = {
         quoteId: `q-${quotes.length}`,
         kind: 'batch',
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+        expiresAt: new Date(Date.now() + (opts.expired ? -1000 : 3_600_000)).toISOString(),
         mode: opts.paid === false ? 'simulated' : 'openai',
         paid: opts.paid !== false,
         estimatedUsd: job.items.length * 0.06,
@@ -555,7 +558,14 @@ describe('geração em lote a partir do storyboard', () => {
     expect(sb.sceneCount).toBe(final.scenes.length)
     expect(sb.imagesExported).toBe(final.scenes.length)
     expect(sb.simulatedImages).toBe(final.scenes.length)
-    expect(sb.scenes.map((s) => s.image!.file)).toEqual(final.scenes.map((_, i) => `storyboard/cenas/cena_${String(i + 1).padStart(3, '0')}.png`))
+    // simuladas: nome com _SIMULADA, nunca confundidas com imagens reais
+    expect(sb.scenes.map((s) => s.image!.file)).toEqual(final.scenes.map((_, i) => `storyboard/cenas/cena_${String(i + 1).padStart(3, '0')}_SIMULADA.png`))
+    expect(sb.readyForAnimation).toBe(0)
+    expect(sb.scenes[0].notReadyReasons).toEqual(expect.arrayContaining(['imagem simulada (fictícia)', 'formato ainda não é 9:16']))
+    // histórico de versões e aprovações
+    expect(sb.scenes[1].versions).toHaveLength(2)
+    expect(sb.scenes[1].versions.filter((v) => v.official)).toHaveLength(1)
+    expect(sb.history.some((h) => /aprovada/.test(h.action))).toBe(true)
     for (const [i, scene] of final.scenes.entries()) {
       const entry = sb.scenes[i]
       const official = scene.images!.find((v) => v.id === scene.officialImageId)!
@@ -584,5 +594,314 @@ describe('geração em lote a partir do storyboard', () => {
     expect(maria.usedInScenes.length).toBeGreaterThan(3)
     expect(maria.files).toHaveLength(1)
     expect(zip.file(maria.files[0].file)).toBeTruthy()
+  })
+
+  it('proteção de custo dentro da execução: tarefa sem autorização é recusada mesmo chamada diretamente', async () => {
+    let app = await openApp()
+    const fake = fakeProvider({ kind: 'backend', hold: true })
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    const started = app.B.startBatch(flowId, settings({ concurrency: 1 }), 'all')
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    app.F.getState().resolveCostConfirmation(true)
+    await started
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    await app.flush()
+
+    // reabre: as pendentes não têm autorização nesta sessão
+    app = await openApp()
+    const fake2 = fakeProvider({ kind: 'backend' })
+    app.B.setBatchHooksForTests({ provider: fake2.provider })
+    const resume = app.B.resumeBatch(flowId)
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    app.F.getState().resolveCostConfirmation(false)
+    await resume
+    const pending = run(app, flowId).tasks.find((t) => t.status === 'pending')!
+    await expect(app.B.executeTaskForTests(flowId, pending.id, 'qualquer')).rejects.toThrow(/sem autorização de custo/)
+    expect(fake2.calls).toHaveLength(0)
+  })
+
+  it('regenerar uma cena depois de reabrir não dispara as outras pendentes sem autorização', async () => {
+    let app = await openApp()
+    const fake = fakeProvider({ kind: 'backend', hold: true })
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    const started = app.B.startBatch(flowId, settings({ concurrency: 1 }), 'all')
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    app.F.getState().resolveCostConfirmation(true)
+    await started
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(1))
+    fake.calls[0].release()
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(2))
+    await app.flush()
+
+    app = await openApp()
+    const fake2 = fakeProvider({ kind: 'backend' })
+    app.B.setBatchHooksForTests({ provider: fake2.provider })
+    const done = run(app, flowId).tasks.find((t) => t.status === 'done')!
+    const regen = app.B.regenerateScene(flowId, done.sceneId)
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    expect(fake2.quotes[0].items).toHaveLength(1) // orçamento só da cena pedida
+    app.F.getState().resolveCostConfirmation(true)
+    expect(await regen).toMatchObject({ ok: true, images: 1 })
+    await vi.waitFor(() => expect(board(app, flowId).scenes.find((s) => s.id === done.sceneId)!.images).toHaveLength(2))
+    await new Promise((res) => setTimeout(res, 50))
+    expect(fake2.calls).toHaveLength(1)
+    expect(run(app, flowId).tasks.filter((t) => t.status === 'pending').length).toBeGreaterThan(10)
+  })
+
+  it('orçamento já vencido na confirmação: nenhuma chamada', async () => {
+    const app = await openApp()
+    const fake = fakeProvider({ kind: 'backend', expired: true })
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    const started = app.B.startBatch(flowId, settings(), 'all')
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    app.F.getState().resolveCostConfirmation(true)
+    expect(await started).toMatchObject({ ok: false, error: expect.stringMatching(/venceu/) })
+    await new Promise((res) => setTimeout(res, 30))
+    expect(fake.calls).toHaveLength(0)
+  })
+
+  it('excluir projeto sem a tela de imagens carregada: storyboard some da memória e do banco', async () => {
+    let app = await openApp()
+    const fake = fakeProvider()
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    await app.B.startBatch(flowId, settings(), 'all')
+    await waitFinished(app, flowId)
+    await app.flush()
+
+    app = await openApp({ batch: false })
+    expect(app.S.getState().boards[flowId]).toBeTruthy()
+    app.F.getState().deleteFlow(flowId)
+    expect(app.S.getState().boards[flowId]).toBeUndefined()
+    await vi.waitFor(async () => {
+      expect((await app.repository.listStoryboards()).map((r) => r.id)).not.toContain(flowId)
+      expect((await app.repository.listAssetOwners()).filter((o) => o.projectId === flowId)).toEqual([])
+    })
+    // e ao reabrir, nada volta
+    app = await openApp({ batch: false })
+    expect(app.S.getState().boards[flowId]).toBeUndefined()
+  })
+
+  it('excluir projeto com geração em andamento: resposta atrasada não grava nada nem recria o storyboard', async () => {
+    const app = await openApp()
+    const fake = fakeProvider({ hold: true })
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    await app.B.startBatch(flowId, settings({ concurrency: 2 }), 'all')
+    await vi.waitFor(() => expect(fake.calls).toHaveLength(2))
+    app.F.getState().deleteFlow(flowId)
+    fake.calls[0].release()
+    fake.calls[1].release()
+    await new Promise((res) => setTimeout(res, 50))
+    await app.flush()
+    expect(fake.calls).toHaveLength(2) // a fila parou
+    expect(app.S.getState().boards[flowId]).toBeUndefined()
+    expect((await app.repository.listStoryboards()).map((r) => r.id)).not.toContain(flowId)
+    expect((await app.repository.listAssetOwners()).filter((o) => o.projectId === flowId)).toEqual([])
+  })
+
+  it('sobras de versões antigas (storyboard de projeto inexistente) são limpas ao abrir', async () => {
+    let app = await openApp({ batch: false })
+    await app.repository.saveStoryboard({ id: 'projeto-fantasma', projectId: 'projeto-fantasma', createdAt: 1, updatedAt: 1, data: { copy: 'x', scenes: [], characters: [] } })
+    app = await openApp({ batch: false })
+    await vi.waitFor(async () => expect((await app.repository.listStoryboards()).map((r) => r.id)).not.toContain('projeto-fantasma'))
+    expect(app.S.getState().boards['projeto-fantasma']).toBeUndefined()
+  })
+
+  it('gpt-image-2: 9:16 nativo (1152×2048), sem expansão e sem input_fidelity', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    await app.B.startBatch(flowId, settings({ model: 'gpt-image-2', size: '1152x2048', autoExpand: true }), 'all')
+    await waitFinished(app, flowId)
+    expect(fake.calls.every((c) => c.request.size === '1152x2048' && c.request.inputFidelity === undefined)).toBe(true)
+    for (const scene of board(app, flowId).scenes) {
+      expect(scene.images).toHaveLength(1)
+      expect(scene.images![0]).toMatchObject({ width: 1152, height: 2048, format: { method: 'native', cropped: false } })
+    }
+  })
+
+  it('modelo sem 9:16: cria a versão expandida (imagem inteira) e guarda a original', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    const rendered: string[] = []
+    app.B.setBatchHooksForTests({
+      provider: fake.provider,
+      renderFormat: async (_src, method) => {
+        rendered.push(method)
+        return bytesToDataUrl(pngBytes(1080, 1920, rendered.length), 'image/png')
+      },
+    })
+    const { flowId } = await setup(app, 'Dona Maria entra na cozinha.\nSeu João lê no quarto.')
+    await app.B.startBatch(flowId, settings({ autoExpand: true }), 'all')
+    await waitFinished(app, flowId)
+    await vi.waitFor(() => expect(board(app, flowId).scenes.every((s) => s.images?.length === 2)).toBe(true))
+    expect(rendered).toEqual(['expanded', 'expanded'])
+    for (const scene of board(app, flowId).scenes) {
+      const [original, expanded] = scene.images!
+      expect(original).toMatchObject({ width: 1024, height: 1536, format: { method: 'unadjusted', cropped: false } })
+      expect(expanded).toMatchObject({ width: 1080, height: 1920, derivedFrom: original.id, format: { method: 'expanded', cropped: false, nativeWidth: 1024 } })
+      expect(scene.officialImageId).toBe(expanded.id)
+      expect((await app.repository.getAsset(expanded.assetId!))!.sceneImage!.derivedFrom).toBe(original.id)
+    }
+  })
+
+  it('reenquadrar: corte grande exige confirmação; imagem aprovada não é trocada pela expansão em massa', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    app.B.setBatchHooksForTests({
+      provider: fake.provider,
+      renderFormat: async () => bytesToDataUrl(pngBytes(1080, 1920, 7), 'image/png'),
+    })
+    const { flowId } = await setup(app, 'Dona Maria entra na cozinha.\nSeu João lê no quarto.')
+    await app.B.startBatch(flowId, settings({ size: '1536x1024' }), 'all') // paisagem: 9:16 cortaria muito
+    await waitFinished(app, flowId)
+    const [s1, s2] = board(app, flowId).scenes
+    const r1 = await app.B.adjustFormat(flowId, s1.id, s1.officialImageId!, 'reframed')
+    expect(r1).toMatchObject({ ok: false, needsConfirmation: true })
+    expect(board(app, flowId).scenes[0].images).toHaveLength(1)
+    const r2 = await app.B.adjustFormat(flowId, s1.id, s1.officialImageId!, 'reframed', { offset: 0.2, confirmLoss: true })
+    expect(r2.ok).toBe(true)
+    expect(board(app, flowId).scenes[0].images![1].format).toMatchObject({ method: 'reframed', cropped: true })
+    expect(board(app, flowId).scenes[0].images![1].format.lossPercent).toBeGreaterThan(60)
+
+    app.B.approveSceneImage(flowId, s2.id)
+    const all = await app.B.expandAllUnadjusted(flowId)
+    expect(all).toMatchObject({ done: 0, skippedApproved: 1 })
+    expect(board(app, flowId).scenes[1].officialImageId).toBe(s2.officialImageId)
+  })
+
+  it('revisão: aprovar e rejeitar por imagem; regenerar SÓ as rejeitadas; aprovada nunca é trocada sem confirmação', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    await app.B.startBatch(flowId, settings(), 'all')
+    await waitFinished(app, flowId)
+    const scenes = board(app, flowId).scenes
+    const [a, b, c] = scenes
+    expect(app.B.approveVersion(flowId, a.id, a.officialImageId!)).toEqual({ ok: true })
+    expect(app.B.rejectVersion(flowId, b.id, b.officialImageId!, ['face', 'clothing'], 'rosto de outra pessoa')).toEqual({ ok: true })
+    expect(app.B.rejectVersion(flowId, c.id, c.officialImageId!, ['framing'])).toEqual({ ok: true })
+    // rejeitar a aprovada exige confirmação
+    expect(app.B.rejectVersion(flowId, a.id, a.officialImageId!, ['quality'])).toMatchObject({ ok: false, needsConfirmation: true })
+    const after = board(app, flowId)
+    expect(after.scenes[1].images![0].review).toMatchObject({ status: 'rejected', problems: ['face', 'clothing'], note: 'rosto de outra pessoa' })
+    expect(after.scenes[0]).toMatchObject({ imageApprovedAt: expect.any(Number) })
+
+    const calls = fake.calls.length
+    const r = await app.B.startBatch(flowId, settings(), 'rejected')
+    expect(r).toMatchObject({ ok: true, images: 2 })
+    await waitFinished(app, flowId)
+    expect(fake.calls.slice(calls).map((x) => sceneText(x.request))).toEqual([b.excerpt, c.excerpt])
+    const final = board(app, flowId)
+    // as rejeitadas ganharam versão nova (oficial), a rejeitada continua guardada
+    expect(final.scenes[1].images).toHaveLength(2)
+    expect(final.scenes[1].officialImageId).toBe(final.scenes[1].images![1].id)
+    expect(final.scenes[0].images).toHaveLength(1)
+    // aprovar outra versão quando já há uma aprovada pede confirmação
+    await app.B.regenerateScene(flowId, a.id)
+    await waitFinished(app, flowId)
+    const newer = board(app, flowId).scenes[0].images![1]
+    expect(app.B.approveVersion(flowId, a.id, newer.id)).toMatchObject({ ok: false, needsConfirmation: true })
+    expect(board(app, flowId).scenes[0].officialImageId).toBe(a.officialImageId)
+    expect(app.B.approveVersion(flowId, a.id, newer.id, { confirmReplace: true })).toEqual({ ok: true })
+    expect(board(app, flowId).scenes[0].officialImageId).toBe(newer.id)
+  })
+
+  it('análise dos pixels: imagem repetida e comparação com a cena anterior aprovada; sem análise = não verificado', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    // "assinatura visual" falsa: igual para as cenas 1 e 3, diferente nas outras
+    const hashes = ['ffffffffffffffff', '0000000000000000', 'fffffffffffffffe', '00000000000000ff']
+    let i = 0
+    app.B.setBatchHooksForTests({
+      provider: fake.provider,
+      analyze: async () => ({ width: 1024, height: 1536, meanLuma: 120, stdLuma: i === 1 ? 0.5 : 40, hash: hashes[i++ % 4] }),
+    })
+    const { flowId } = await setup(app, 'Dona Maria entra na cozinha.\nDona Maria abre a geladeira.\nDona Maria fecha a geladeira.\nDona Maria sorri.')
+    await app.B.startBatch(flowId, settings({ concurrency: 1 }), 'all')
+    await waitFinished(app, flowId)
+    let scenes = board(app, flowId).scenes
+    expect(scenes[1].images![0].analysis).toMatchObject({ blank: true })
+    expect(scenes[2].images![0].analysis).toMatchObject({ duplicateOf: 1 })
+
+    app.B.approveSceneImage(flowId, scenes[2].id)
+    await app.B.regenerateScene(flowId, scenes[3].id)
+    await waitFinished(app, flowId)
+    scenes = board(app, flowId).scenes
+    expect(scenes[3].images![1].analysis!.similarToPrevious).toMatchObject({ sceneNumber: 3 })
+
+    const { autoChecks, buildChecklist } = await import('../../batch/review')
+    const checks = autoChecks(scenes[2].images![0])
+    expect(checks.find((c) => c.id === 'duplicate')).toMatchObject({ result: 'warning' })
+    expect(checks.find((c) => c.id === 'format')).toMatchObject({ result: 'warning' }) // 2:3 ainda não ajustado
+    const noAnalysis = autoChecks({ ...scenes[0].images![0], analysis: undefined })
+    expect(noAnalysis.find((c) => c.id === 'pixels')).toMatchObject({ result: 'unverified' })
+    const list = buildChecklist(scenes[0], board(app, flowId))
+    expect(list.map((x) => x.label)).toEqual(
+      expect.arrayContaining(['Exatamente 1 pessoa(s) principal(is): Dona Maria', 'Rosto de Dona Maria confere com a foto original', 'Ambiente: cozinha']),
+    )
+    expect(list.every((x) => x.kind === 'human')).toBe(true)
+  })
+
+  it('consistência: número de pessoas e posições no prompt; mesma ficha para duas pessoas bloqueia; troca de roupa sem motivo gera aviso', async () => {
+    const app = await openApp()
+    const fake = fakeProvider()
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app)
+    const b = board(app, flowId)
+    const hug = b.scenes.find((s) => s.excerpt === 'Dona Maria abraça Seu João no sofá.')!
+    app.S.getState().updateScene(flowId, hug.id, { positions: 'Dona Maria à esquerda, Seu João à direita' })
+    app.S.getState().setSceneStatus(flowId, hug.id, 'approved')
+    const plan = app.B.previewBatch(flowId, settings(), 'selected', [hug.id])
+    expect(plan.tasks[0].prompt).toMatch(/People in this image: exactly 2 main people \(Dona Maria, Seu João\), each one shown once/)
+    expect(plan.tasks[0].prompt).toMatch(/Positions in the frame \(left to right\): Dona Maria à esquerda, Seu João à direita/)
+
+    // roupa muda sem a copy dizer
+    const later = b.scenes.find((s) => s.excerpt.startsWith('Dona Maria observa'))!
+    app.S.getState().updateScene(flowId, later.id, { wardrobe: 'Dona Maria: vestido vermelho' })
+    app.S.getState().setSceneStatus(flowId, later.id, 'approved')
+    const plan2 = app.B.previewBatch(flowId, settings(), 'selected', [later.id])
+    expect(plan2.scenes.find((s) => s.sceneId === later.id)!.warnings.join(' ')).toMatch(/A roupa de Dona Maria muda .*sem a copy indicar troca/)
+
+    // Seu João ligado à mesma ficha da Dona Maria → bloqueia (rostos se misturariam)
+    const maria = b.characters.find((c) => c.name === 'Dona Maria')!
+    const joao = b.characters.find((c) => c.name === 'Seu João')!
+    app.S.getState().resolveCharacter(flowId, joao.key, maria.libraryId)
+    const plan3 = app.B.previewBatch(flowId, settings(), 'selected', [hug.id])
+    expect(plan3.tasks).toHaveLength(0)
+    expect(plan3.scenes.find((s) => s.sceneId === hug.id)!.blocking.join(' ')).toMatch(/mesma ficha da biblioteca/)
+  })
+
+  it('exportação: imagem real, aprovada e 9:16 nativo aparece como PRONTA; as outras com o motivo', async () => {
+    const app = await openApp()
+    const fake = fakeProvider({ kind: 'backend' })
+    app.B.setBatchHooksForTests({ provider: fake.provider })
+    const { flowId } = await setup(app, 'Dona Maria entra na cozinha.\nSeu João lê no quarto.')
+    const started = app.B.startBatch(flowId, settings({ model: 'gpt-image-2', size: '1152x2048' }), 'all')
+    await vi.waitFor(() => expect(app.F.getState().costConfirmation).not.toBeNull())
+    app.F.getState().resolveCostConfirmation(true)
+    await started
+    await waitFinished(app, flowId)
+    const [s1] = board(app, flowId).scenes
+    app.B.approveVersion(flowId, s1.id, s1.officialImageId!)
+    const { buildProjectZip } = await import('../../export/projectZip')
+    const state = app.F.getState()
+    const { manifest } = await buildProjectZip({
+      meta: state.flows.find((f) => f.id === flowId)!,
+      slice: state.flowsData[flowId],
+      loadAsset: (id) => app.repository.getAsset(id),
+      characters: app.C.getState().characters,
+      storyboard: board(app, flowId),
+    })
+    const [a, b] = manifest.storyboard!.scenes
+    expect(a).toMatchObject({ readyForAnimation: true, notReadyReasons: [], image: { file: 'storyboard/cenas/cena_001.png', formatMethod: 'native', width: 1152, height: 2048, simulated: false } })
+    expect(b).toMatchObject({ readyForAnimation: false, notReadyReasons: ['imagem ainda não aprovada'] })
+    expect(manifest.storyboard!.readyForAnimation).toBe(1)
   })
 })
