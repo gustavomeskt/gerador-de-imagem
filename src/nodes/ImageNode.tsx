@@ -10,6 +10,7 @@ import {
   X,
 } from 'lucide-react'
 import NodeMenu from '../components/NodeMenu'
+import { extensionFor } from '../lib/binary'
 import {
   clampCount,
   MAX_IMAGES_PER_NODE,
@@ -21,12 +22,6 @@ import {
 import { useFlowId } from '../store/flowIdContext'
 import { useFlowStore, type ImageNodeData, type ImageSlot } from '../store/useFlowStore'
 
-const EXTENSIONS: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-}
 
 export default function ImageNode({ id, data, selected }: NodeProps & { data: ImageNodeData }) {
   const flowId = useFlowId()
@@ -52,7 +47,7 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
 
   function downloadImage(slot: ImageSlot, index: number) {
     if (!slot.src) return
-    const ext = EXTENSIONS[slot.mimeType ?? ''] ?? 'png'
+    const ext = extensionFor(slot.mimeType)
     const link = document.createElement('a')
     link.href = slot.src
     link.download = `imagem-${id}-${index + 1}.${ext}`
@@ -174,6 +169,15 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
               )}
 
               {slot.status === 'done' && slot.src && <img src={slot.src} alt={`Gerada ${index + 1}`} />}
+
+              {slot.status === 'done' && slot.unsaved && (
+                <div
+                  className="ifs-image__unsaved"
+                  title="Esta imagem não foi salva no navegador e some ao fechar o app. Baixe ou exporte o ZIP."
+                >
+                  não salva
+                </div>
+              )}
 
               <div className="ifs-image__overlay">
                 <button

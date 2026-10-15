@@ -1,10 +1,11 @@
 import { Background, Panel, ReactFlow, ReactFlowProvider } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useMemo } from 'react'
+import { useEffect, useMemo } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import FlowHeader from './components/FlowHeader'
 import Home from './components/Home'
 import NodeDock from './components/NodeDock'
+import StorageBanner from './components/StorageBanner'
 import ImageNode from './nodes/ImageNode'
 import PromptNode from './nodes/PromptNode'
 import { FlowIdContext } from './store/flowIdContext'
@@ -67,9 +68,25 @@ function HomeRoute() {
 }
 
 export default function App() {
+  const hydrated = useFlowStore((s) => s.hydrated)
+  const hydrate = useFlowStore((s) => s.hydrate)
+
+  useEffect(() => {
+    void hydrate()
+  }, [hydrate])
+
+  if (!hydrated) {
+    return (
+      <div className="ifs-app ifs-loading">
+        <span>Carregando projetos salvos…</span>
+      </div>
+    )
+  }
+
   return (
     <BrowserRouter>
       <div className="ifs-app">
+        <StorageBanner />
         <Routes>
           <Route path="/" element={<HomeRoute />} />
           <Route path="/flow/:id" element={<FlowRoute />} />

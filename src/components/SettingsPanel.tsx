@@ -4,6 +4,7 @@ import { getProvider, PROVIDER_KINDS } from '../generation/providers'
 import type { ProviderKind } from '../generation/types'
 import { hasLegacyApiKey, removeLegacyApiKey } from '../lib/storage'
 import { useFlowStore } from '../store/useFlowStore'
+import StorageSettings from './StorageSettings'
 
 const PROVIDER_HELP: Record<ProviderKind, string> = {
   mock: `Gera imagens de teste localmente, sem rede e sem custo. Pra testar o caminho de erro, inclua ${SIMULATE_ERROR_TOKEN} no prompt.`,
@@ -48,6 +49,8 @@ export default function SettingsPanel() {
           </label>
         ))}
       </fieldset>
+
+      <StorageSettings />
 
       {legacyKey && (
         <div className="ifs-settings-panel__warning">

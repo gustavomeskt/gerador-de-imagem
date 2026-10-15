@@ -1,5 +1,6 @@
-import { Plus, Settings, Trash2, Workflow } from 'lucide-react'
+import { FileArchive, Plus, Settings, Trash2, Workflow } from 'lucide-react'
 import { useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { exportProjectZip } from '../export/exportProject'
 import { useFlowStore } from '../store/useFlowStore'
 import SettingsPanel from './SettingsPanel'
 
@@ -15,6 +16,15 @@ export default function Home({ onOpenFlow }: HomeProps) {
 
   function handleCreate() {
     onOpenFlow(createFlow())
+  }
+
+  async function handleExport(e: ReactMouseEvent, id: string) {
+    e.stopPropagation()
+    try {
+      await exportProjectZip(id)
+    } catch (err) {
+      alert(`Falha ao exportar: ${err instanceof Error ? err.message : 'erro desconhecido'}`)
+    }
   }
 
   function handleDelete(e: ReactMouseEvent, id: string, name: string) {
@@ -64,6 +74,14 @@ export default function Home({ onOpenFlow }: HomeProps) {
                 <div key={f.id} className="ifs-flow-card" onClick={() => onOpenFlow(f.id)}>
                   <Workflow size={18} />
                   <span>{f.name}</span>
+                  <button
+                    type="button"
+                    className="ifs-flow-card__export"
+                    title="Exportar imagens em ZIP"
+                    onClick={(e) => handleExport(e, f.id)}
+                  >
+                    <FileArchive size={14} />
+                  </button>
                   <button
                     type="button"
                     className="ifs-flow-card__delete"
