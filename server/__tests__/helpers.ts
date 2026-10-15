@@ -93,7 +93,9 @@ export interface FakeCall {
 export function fakeOpenAI(handler: (call: FakeCall) => Response | Promise<Response>) {
   const calls: FakeCall[] = []
   const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
-    const call = { url: String(input), init: init ?? {}, body: JSON.parse(String(init?.body ?? '{}')) }
+    // multipart (FormData) fica em init.body; JSON é interpretado em body
+    const body = typeof init?.body === 'string' ? JSON.parse(init.body) : {}
+    const call = { url: String(input), init: init ?? {}, body }
     calls.push(call)
     return handler(call)
   }) as typeof fetch

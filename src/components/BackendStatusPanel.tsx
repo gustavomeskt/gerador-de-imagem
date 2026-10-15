@@ -64,6 +64,16 @@ export default function BackendStatusPanel() {
           </dd>
           <dt>Modelos</dt>
           <dd>{status.allowedModels.join(', ')}</dd>
+          {status.referenceModels && (
+            <>
+              <dt>Referências</dt>
+              <dd>
+                até {status.limits.maxReferenceImages} fotos de até{' '}
+                {Math.round((status.limits.maxReferenceBytes ?? 0) / 1024 / 1024)} MB por geração ·{' '}
+                {status.referenceModels.length ? status.referenceModels.join(', ') : 'nenhum modelo permitido aceita'}
+              </dd>
+            </>
+          )}
         </dl>
       )}
     </div>

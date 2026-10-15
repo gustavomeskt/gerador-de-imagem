@@ -124,7 +124,7 @@ Rotas (todas em `/api`, repassadas pelo Vite em desenvolvimento):
 | `GET /api/health` | servidor no ar |
 | `GET /api/status` | modo, se há chave (sim/não), limites, consumo do dia |
 | `POST /api/images/quote` | orçamento de uma geração (todas as imagens de um nó) |
-| `POST /api/images/generate` | gera imagens — exige o cabeçalho `X-Cost-Quote` |
+| `POST /api/images/generate` | gera imagens — exige o cabeçalho `X-Cost-Quote`; com `references` usa o endpoint de edição da OpenAI com as fotos |
 | `POST /api/prompts/quote` | orçamento do "Melhorar prompt" |
 | `POST /api/prompts/enhance` | melhora o prompt — exige `X-Cost-Quote` |
 
@@ -138,8 +138,10 @@ Proteções:
 - **Validação estrita:** lista de modelos permitidos (`ALLOWED_MODELS`),
   tamanhos/qualidades/quantidade válidos por modelo, limite de tamanho do
   prompt por modelo, campos desconhecidos recusados — nada arbitrário chega à
-  OpenAI. Campos das próximas etapas (`references`, `characters`...) são
-  recusados com mensagem clara.
+  OpenAI. Fotos de referência são conferidas pelos bytes (assinatura do
+  arquivo, tamanho, dimensões, tipo declarado = tipo real); URLs não são
+  aceitas — o servidor nunca baixa nada de fora. Campos das próximas etapas
+  (`characters`, `scenes`...) são recusados com mensagem clara.
 - **Confirmação de custo obrigatória:** o servidor só faz uma chamada paga
   com um orçamento (`quoteId`) que a pessoa confirmou na tela, que bate
   exatamente com o pedido, não venceu e não foi usado além do confirmado.
@@ -170,10 +172,73 @@ navegador**. A interface conversa só com um *provedor* (`src/generation/`):
   servidor. O `vite.config.ts` repassa `/api` para `http://127.0.0.1:8787`
   (ou `API_PROXY_TARGET`).
 - `openaiRequest.ts` — regras de montagem dos pedidos à OpenAI, usadas pelo
-  backend (lógica pura, sem chamadas nem chave).
+  backend (lógica pura, sem chamadas nem chave): JSON para geração e
+  multipart (`image[]`) para edição com referências.
+- `references.ts` — imagens de referência: modelos compatíveis, limites,
+  validação dos arquivos pelos bytes e o texto que diz ao modelo qual foto é
+  de quem.
 - `service.ts` — orquestra uma geração: divide em chamadas pelo limite do
   modelo, recorta 9:16/16:9 e devolve um resultado por imagem (uma falha não
   derruba as outras).
+
+## Imagens de referência
+
+Fotos reais enviadas por você que vão **junto** com o pedido ao modelo — a
+base para manter a identidade dos personagens. As fotos nunca são trocadas
+por descrições em texto: elas são enviadas de verdade (endpoint
+`/v1/images/edits` da OpenAI, via backend).
+
+**Como usar**
+
+1. No dock, clique no ícone de pessoa (**Novo nó de referência**).
+2. Dê um nome ("Dona Maria"), escolha o tipo — *Personagem*, *Roupa*,
+   *Cenário ou objeto* ou *Estilo* — e, para personagens, marque **Manter a
+   roupa da foto** se quiser a mesma roupa.
+3. **Adicionar fotos**: uma ou várias (PNG, JPG ou WebP, até 8 MB cada, até
+   6 por nó). Passe o mouse numa foto para **substituir** ou **remover**.
+   Arquivos inválidos são recusados com aviso.
+4. Ligue a bolinha verde do nó de Referência na **bolinha verde** do nó de
+   Imagem (a de baixo; a de cima é o prompt). Pode ligar várias referências
+   no mesmo nó de Imagem — cada uma vale só para os nós onde está ligada.
+5. No nó de Imagem aparece quantas fotos vão junto e o seletor de
+   **Fidelidade** (alta preserva melhor rosto e traços, e custa mais).
+6. **Gerar** — o orçamento já inclui o custo das fotos; confirme.
+
+**Modelos e recursos** (conferido no SDK oficial da OpenAI, out/2026):
+
+| Modelo | Aceita referências | Fidelidade (`input_fidelity`) |
+|---|---|---|
+| GPT Image 1.5 | sim (API: até 16; app: até 6) | alta ou baixa |
+| GPT Image 1 | sim (API: até 16; app: até 6) | alta ou baixa |
+| GPT Image 1 Mini | sim (API: até 16; app: até 6) | só baixa (o app não envia o parâmetro) |
+| DALL-E 3 / DALL-E 2 | não — o app avisa e não gera | — |
+
+Sem referências ligadas, a geração continua exatamente como antes.
+
+**O que o app faz para a consistência**
+
+- Envia as fotos dos **personagens primeiro** (com fidelidade alta os
+  modelos dão mais peso às primeiras imagens), depois roupa, objetos e
+  estilo.
+- Junta às fotos um texto curto dizendo **qual imagem é de quem** ("Imagens
+  1-2: Dona Maria — mesma pessoa: mesmo rosto, idade aparente, cabelo,
+  traços; expressão, pose e ângulo podem mudar"), pedindo para não misturar
+  pessoas diferentes e para não colocar textos nem marcas-d'água.
+- A imagem gerada guarda quais referências foram usadas (vai também para o
+  `manifest.json` do ZIP).
+
+> **A fidelidade facial não está garantida.** Toda a infraestrutura foi
+> testada com imagens fictícias e respostas simuladas; a qualidade real da
+> preservação do rosto, idade e roupas só pode ser avaliada com chamadas
+> reais à OpenAI.
+
+**Armazenamento:** as fotos ficam no IndexedDB, ligadas ao projeto, e voltam
+ao reabrir o app. A mesma foto usada em vários nós é guardada **uma vez só**
+(pelo hash do conteúdo) e só é apagada quando nenhum nó a usa mais.
+
+**Limites do servidor** (`.env`): `MAX_REFERENCE_IMAGES` (padrão 6, máx. 16)
+e `MAX_REFERENCE_FILE_MB` (padrão 8, máx. 50). O limite de tamanho da
+requisição com fotos é calculado a partir deles (ou `MAX_EDIT_BODY_BYTES`).
 
 ## Armazenamento e exportação
 
@@ -238,7 +303,8 @@ integridade).
 **Tela do fluxo** — canvas do React Flow com:
 - Botão de voltar (seta) + nome do fluxo no canto superior esquerdo. Clique
   no nome pra renomear. Ao lado, o botão de exportar o fluxo em ZIP.
-- Dock flutuante à esquerda com os botões **Prompt** e **Imagem** pra criar nós.
+- Dock flutuante à esquerda com os botões **Prompt**, **Imagem** e
+  **Referência** pra criar nós.
 
 ## Uso
 

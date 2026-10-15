@@ -1,7 +1,7 @@
 import JSZip from 'jszip'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { STORAGE_MESSAGES } from '../../persistence/errors'
-import { labelFromBytes, svgImage as img } from '../../test/fixtures'
+import { fileFrom, jpegBytes, labelFromBytes, pngBytes, svgImage as img } from '../../test/fixtures'
 import { testing } from './testProvider'
 
 vi.mock('../../generation/providers', async () => {
@@ -151,6 +151,59 @@ describe('restauração após atualizar ou fechar o app', () => {
     })
     const reopened = await openApp()
     expect(await reopened.repository.getAsset('perdido')).toBeUndefined()
+  })
+})
+
+describe('referências após atualizar ou reabrir', () => {
+  it('nó de referência volta com nome, tipo, fotos e os mesmos bytes', async () => {
+    const app = await openApp()
+    const flowId = app.useFlowStore.getState().createFlow()
+    app.useFlowStore.getState().addReferenceNode(flowId, { x: 0, y: 0 })
+    const refId = app.useFlowStore.getState().flowsData[flowId].nodes[0].id
+    app.useFlowStore.getState().updateReferenceData(flowId, refId, { label: 'Maria', role: 'character', preserveClothing: true })
+    const photos = [pngBytes(800, 1200, 1), jpegBytes(600, 900, 2)]
+    await app.useFlowStore.getState().addReferenceImages(flowId, refId, [fileFrom('a.png', photos[0]), fileFrom('b.jpg', photos[1])])
+    await app.flushDirtyFlows()
+
+    const reopened = await openApp()
+    const node = reopened.useFlowStore.getState().flowsData[flowId].nodes.find((n) => n.id === refId)
+    expect(node?.type).toBe('reference')
+    if (node?.type !== 'reference') return
+    expect(node.data).toMatchObject({ label: 'Maria', role: 'character', preserveClothing: true })
+    expect(node.data.images.map((i) => [i.name, i.width, i.height, !!i.src, i.missing ?? false])).toEqual([
+      ['a.png', 800, 1200, true, false],
+      ['b.jpg', 600, 900, true, false],
+    ])
+    for (const [i, img] of node.data.images.entries()) {
+      const asset = await reopened.repository.getAsset(img.assetId!)
+      expect(new Uint8Array(asset!.bytes)).toEqual(photos[i])
+    }
+  })
+
+  it('foto salva antes da estrutura volta ao nó; arquivo sumido aparece como ausente', async () => {
+    const app = await openApp()
+    const flowId = app.useFlowStore.getState().createFlow()
+    app.useFlowStore.getState().addReferenceNode(flowId, { x: 0, y: 0 })
+    const refId = app.useFlowStore.getState().flowsData[flowId].nodes[0].id
+    await app.useFlowStore.getState().addReferenceImages(flowId, refId, [fileFrom('salva.png', pngBytes(10, 10, 3))])
+    await app.flushDirtyFlows()
+
+    // a estrutura para de salvar; a segunda foto só chega ao banco de arquivos
+    vi.spyOn(app.repository, 'saveProjects').mockRejectedValue(new Error('aba fechada'))
+    await app.useFlowStore.getState().addReferenceImages(flowId, refId, [fileFrom('tardia.png', pngBytes(10, 10, 4))])
+    const lostAsset = app.useFlowStore.getState().flowsData[flowId].nodes[0]
+    vi.restoreAllMocks()
+    // e a primeira foto some do armazenamento
+    const first = lostAsset.type === 'reference' ? lostAsset.data.images[0].assetId! : ''
+    await app.repository.deleteAssets([first])
+
+    const reopened = await openApp()
+    const node = reopened.useFlowStore.getState().flowsData[flowId].nodes[0]
+    if (node.type !== 'reference') throw new Error('esperava nó de referência')
+    expect(node.data.images.map((i) => [i.name, i.missing ?? false])).toEqual([
+      ['salva.png', true],
+      ['tardia.png', false],
+    ])
   })
 })
 

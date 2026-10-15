@@ -7,14 +7,20 @@ import {
   type ImageJob,
   type ImageProvider,
 } from './types'
+import { toDescriptor } from './references'
 
 // Provedor real, via backend próprio (pasta server/). O navegador NUNCA vê a
 // chave da API: ele só chama rotas /api/* do servidor local, que guarda a
 // chave em variável de ambiente e repassa o pedido pra OpenAI.
 //
 // Contrato com o backend:
-//   POST /api/images/quote     { model, prompt, size, quality?, totalImages } → CostQuote
-//   POST /api/images/generate  { model, prompt, size, quality?, n }  + cabeçalho X-Cost-Quote
+//   POST /api/images/quote     { model, prompt, size, quality?, totalImages,
+//                                references?: [{ sha256, mimeType, byteLength, width, height }],
+//                                inputFidelity? } → CostQuote
+//   POST /api/images/generate  { model, prompt, size, quality?, n,
+//                                references?: [{ mimeType, b64 }], inputFidelity? }
+//                              + cabeçalho X-Cost-Quote
+//     (com references o servidor usa o endpoint de edição da OpenAI, com as fotos)
 //     → 200 { images: [{ b64: string, mimeType?: string }] }
 //   POST /api/prompts/quote    { prompt } → CostQuote
 //   POST /api/prompts/enhance  { prompt }  + cabeçalho X-Cost-Quote
@@ -39,6 +45,7 @@ export interface BackendStatus {
   mode: 'simulated' | 'openai'
   keyConfigured: boolean
   allowedModels: string[]
+  referenceModels?: string[]
   limits: Record<string, number>
   usageToday: { date: string; images: number; estimatedUsd: number; calls: number }
   prices: { referenceDate: string; source: string }
@@ -113,7 +120,16 @@ export function createBackendProvider(options: BackendProviderOptions = {}): Ima
     label: 'OpenAI via backend local (seguro)',
 
     quoteImages(job: ImageJob) {
-      return quote('/images/quote', job, 'ao orçar a geração')
+      const body = {
+        model: job.model,
+        prompt: job.prompt,
+        size: job.size,
+        quality: job.quality,
+        totalImages: job.totalImages,
+        ...(job.references?.length ? { references: job.references.map(toDescriptor) } : {}),
+        ...(job.references?.length && job.inputFidelity ? { inputFidelity: job.inputFidelity } : {}),
+      }
+      return quote('/images/quote', body, 'ao orçar a geração')
     },
 
     quoteEnhance(prompt: string) {
@@ -121,7 +137,18 @@ export function createBackendProvider(options: BackendProviderOptions = {}): Ima
     },
 
     async generateImages(req: ImageGenerationRequest, callOptions?: CallOptions): Promise<GeneratedImage[]> {
-      const data = (await request('POST', '/images/generate', req, 'ao gerar imagens', callOptions?.quoteId)) as {
+      // referências vão só com tipo + bytes; o servidor recalcula hash e
+      // dimensões a partir dos bytes e confere com o orçamento
+      const body = {
+        model: req.model,
+        prompt: req.prompt,
+        size: req.size,
+        quality: req.quality,
+        n: req.n,
+        ...(req.references?.length ? { references: req.references.map((r) => ({ mimeType: r.mimeType, b64: r.b64 })) } : {}),
+        ...(req.references?.length && req.inputFidelity ? { inputFidelity: req.inputFidelity } : {}),
+      }
+      const data = (await request('POST', '/images/generate', body, 'ao gerar imagens', callOptions?.quoteId)) as {
         images?: Array<{ b64?: unknown; mimeType?: unknown }>
       }
       if (!Array.isArray(data?.images)) {

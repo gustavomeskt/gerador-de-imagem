@@ -7,18 +7,29 @@ import {
   type NodeChange,
 } from '@xyflow/react'
 import { create } from 'zustand'
-import { clampCount, DEFAULT_MODEL, getSizeOption, isImageModel, MODEL_SIZES } from '../generation/models'
+import { clampCount, DEFAULT_MODEL, getSizeOption, isImageModel, MODEL_LABELS, MODEL_SIZES, type ImageModel } from '../generation/models'
+import {
+  buildReferencePrompt,
+  checkReferenceFile,
+  DEFAULT_MAX_REFERENCES,
+  effectiveFidelity,
+  ROLE_ORDER,
+  supportsReferences,
+  toDescriptor,
+  type InputFidelity,
+  type ReferenceImageInput,
+} from '../generation/references'
 import { getProvider } from '../generation/providers'
 import { resolveAspect, runGeneration, type ImageGenerationConfig, type ImageResult } from '../generation/service'
 import type { CostQuote, GeneratedImage, ImageJob, ImageProvider, ProviderKind } from '../generation/types'
-import { dataUrlToBytes, readImageSize, toArrayBuffer } from '../lib/binary'
+import { bytesToBase64, bytesToDataUrl, dataUrlToBytes, readImageSize, sha256Hex, toArrayBuffer } from '../lib/binary'
 import { cropToAspect } from '../lib/image'
 import { loadFlowsRaw, loadImagePreset, loadProviderKind, saveImagePreset, saveProviderKind } from '../lib/storage'
 import { getAssetUrl, releaseAssetUrl } from '../persistence/assetUrls'
 import { toStorageError, type StorageIssueKind } from '../persistence/errors'
 import { legacyFlowToProject, migrateLegacyFlows } from '../persistence/migration'
 import { repository } from '../persistence/repository'
-import type { AssetRecord, ProjectRecord } from '../persistence/schema'
+import type { AssetRecord, AssetSource, ProjectRecord } from '../persistence/schema'
 import { collectAssetIds, restoreProject, serializeProject, type RestoredProject } from './projectSerialization'
 import type {
   FlowMeta,
@@ -29,9 +40,15 @@ import type {
   ImageSlot,
   PromptFlowNode,
   PromptNodeData,
+  ReferenceFlowNode,
+  ReferenceImage,
+  ReferenceNodeData,
 } from './types'
 
 export type {
+  ReferenceFlowNode,
+  ReferenceImage,
+  ReferenceNodeData,
   FlowMeta,
   FlowNode,
   ImageFlowNode,
@@ -101,6 +118,11 @@ interface FlowState {
 
   addPromptNode: (flowId: string, position: { x: number; y: number }) => void
   addImageNode: (flowId: string, position: { x: number; y: number }) => void
+  addReferenceNode: (flowId: string, position: { x: number; y: number }) => void
+  updateReferenceData: (flowId: string, id: string, partial: Partial<Pick<ReferenceNodeData, 'label' | 'role' | 'preserveClothing'>>) => void
+  addReferenceImages: (flowId: string, nodeId: string, files: ReferenceFileInput[]) => Promise<void>
+  replaceReferenceImage: (flowId: string, nodeId: string, imageId: string, file: ReferenceFileInput) => Promise<void>
+  removeReferenceImage: (flowId: string, nodeId: string, imageId: string) => void
   deleteNode: (flowId: string, id: string) => void
 
   updatePromptData: (flowId: string, id: string, partial: Partial<PromptNodeData>) => void
@@ -153,6 +175,51 @@ interface GenerationContext {
   prompt: string
   config: ImageGenerationConfig
   provider: ProviderKind
+  references?: AssetSource['references']
+  inputFidelity?: InputFidelity
+}
+
+// Arquivo escolhido pela pessoa (File do navegador, ou equivalente nos testes).
+export interface ReferenceFileInput {
+  name: string
+  arrayBuffer(): Promise<ArrayBuffer>
+}
+
+// Referências prontas pra uma geração: as fotos (bytes) + o texto que diz
+// ao modelo qual imagem é de quem.
+interface PreparedReferences {
+  prompt: string
+  inputs: ReferenceImageInput[]
+  sourceRefs: NonNullable<AssetSource['references']>
+  inputFidelity?: InputFidelity
+}
+
+const REFERENCE_EDGE_HANDLE = 'refs-in'
+
+// Só liga prompt → entrada de prompt e referência → entrada de referências.
+export function isValidFlowConnection(c: { sourceHandle?: string | null; targetHandle?: string | null }): boolean {
+  return (
+    (c.sourceHandle === 'prompt-out' && c.targetHandle === 'prompt-in') ||
+    (c.sourceHandle === 'ref-out' && c.targetHandle === REFERENCE_EDGE_HANDLE)
+  )
+}
+
+function connectedReferenceNodes(slice: FlowSlice, imageNodeId: string): ReferenceFlowNode[] {
+  const seen = new Set<string>()
+  const nodes: ReferenceFlowNode[] = []
+  for (const e of slice.edges) {
+    if (e.target !== imageNodeId || e.targetHandle !== REFERENCE_EDGE_HANDLE || seen.has(e.source)) continue
+    const node = slice.nodes.find((n) => n.id === e.source)
+    if (node?.type === 'reference') {
+      seen.add(node.id)
+      nodes.push(node)
+    }
+  }
+  // personagens primeiro: com fidelidade alta os modelos priorizam as primeiras imagens
+  return nodes
+    .map((n, i) => ({ n, i }))
+    .sort((a, b) => ROLE_ORDER.indexOf(a.n.data.role) - ROLE_ORDER.indexOf(b.n.data.role) || a.i - b.i)
+    .map(({ n }) => n)
 }
 
 let hydrating: Promise<void> | null = null
@@ -271,6 +338,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
           size: ctx.config.size,
           quality: ctx.config.quality,
           provider: ctx.provider,
+          ...(ctx.references?.length ? { references: ctx.references, inputFidelity: ctx.inputFidelity } : {}),
         },
       }
       await repository.putAsset(asset)
@@ -284,7 +352,11 @@ export const useFlowStore = create<FlowState>((set, get) => {
   // Remove arquivos que saíram do projeto. Salva a estrutura ANTES de apagar
   // os arquivos, pra nunca existir um projeto salvo apontando pra um arquivo
   // que já não existe.
-  async function discardAssets(flowId: string, assetIds: string[]) {
+  async function discardAssets(flowId: string, candidates: string[]) {
+    // um arquivo pode estar em mais de um nó (a mesma foto de referência):
+    // só apaga o que nenhum nó usa mais
+    const inUse = new Set(collectAssetIds(get().flowsData[flowId]?.nodes ?? []))
+    const assetIds = [...new Set(candidates)].filter((id) => !inUse.has(id))
     for (const id of assetIds) releaseAssetUrl(id)
     if (!isPersistent()) return
     await persistNow(flowId)
@@ -314,7 +386,156 @@ export const useFlowStore = create<FlowState>((set, get) => {
 
     const config: ImageGenerationConfig = { model: node.data.model, size: node.data.size, quality: node.data.quality }
     const providerKind = get().providerKind
-    return { node, prompt, config, provider: getProvider(providerKind), ctx: { prompt, config, provider: providerKind } }
+    const ctx: GenerationContext = { prompt, config, provider: providerKind }
+    return { node, prompt, config, provider: getProvider(providerKind), ctx }
+  }
+
+  function findReferenceNode(flowId: string, nodeId: string): ReferenceFlowNode | undefined {
+    const node = get().flowsData[flowId]?.nodes.find((n) => n.id === nodeId)
+    return node?.type === 'reference' ? node : undefined
+  }
+
+  function updateReferenceNode(flowId: string, id: string, updater: (data: ReferenceNodeData) => ReferenceNodeData) {
+    updateFlowSlice(flowId, (slice) => ({
+      ...slice,
+      nodes: slice.nodes.map((n) => (n.id === id && n.type === 'reference' ? { ...n, data: updater(n.data) } : n)),
+    }))
+  }
+
+  function hasReferenceEdges(flowId: string, imageNodeId: string): boolean {
+    return !!get().flowsData[flowId]?.edges.some((e) => e.target === imageNodeId && e.targetHandle === REFERENCE_EDGE_HANDLE)
+  }
+
+  // Lê, valida e salva uma foto de referência. A mesma foto (mesmo hash) já
+  // usada em outro nó do projeto reaproveita o arquivo salvo — sem cópia.
+  async function ingestReferenceFile(
+    flowId: string,
+    nodeId: string,
+    file: ReferenceFileInput,
+  ): Promise<{ image: ReferenceImage } | { error: string }> {
+    let bytes: Uint8Array
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer())
+    } catch {
+      return { error: `${file.name}: não foi possível ler o arquivo` }
+    }
+    const check = checkReferenceFile(bytes)
+    if (!check.ok) return { error: `${file.name}: ${check.error}` }
+    const sha256 = await sha256Hex(bytes)
+    const base = {
+      id: nextId('ref'),
+      name: file.name,
+      mimeType: check.mimeType,
+      byteLength: bytes.byteLength,
+      width: check.width,
+      height: check.height,
+      sha256,
+    }
+
+    const existing = (get().flowsData[flowId]?.nodes ?? [])
+      .flatMap((n) => (n.type === 'reference' ? n.data.images : []))
+      .find((img) => img.sha256 === sha256 && img.assetId && !img.missing)
+    if (existing) return { image: { ...base, assetId: existing.assetId, src: existing.src } }
+
+    if (!isPersistent()) return { image: { ...base, src: bytesToDataUrl(bytes, check.mimeType) } }
+    try {
+      const asset: AssetRecord = {
+        id: nextId('asset'),
+        projectId: flowId,
+        kind: 'reference',
+        mimeType: check.mimeType,
+        bytes: toArrayBuffer(bytes),
+        byteLength: bytes.byteLength,
+        width: check.width,
+        height: check.height,
+        createdAt: Date.now(),
+        sha256,
+        reference: { nodeId, name: file.name },
+      }
+      await repository.putAsset(asset)
+      return { image: { ...base, assetId: asset.id, src: getAssetUrl(asset.id, asset.bytes, asset.mimeType) } }
+    } catch (err) {
+      reportStorageIssue(err)
+      return { image: { ...base, src: bytesToDataUrl(bytes, check.mimeType), unsaved: true } }
+    }
+  }
+
+  async function readReferenceBytes(img: ReferenceImage): Promise<Uint8Array> {
+    if (img.src?.startsWith('data:')) return dataUrlToBytes(img.src).bytes
+    if (img.assetId && isPersistent()) {
+      const asset = await repository.getAsset(img.assetId)
+      if (asset) return new Uint8Array(asset.bytes)
+    }
+    throw new Error(`a foto "${img.name}" não foi encontrada no armazenamento — substitua ou remova`)
+  }
+
+  // Junta as referências conectadas ao nó de imagem: confere compatibilidade
+  // e limites, carrega os BYTES de cada foto e monta o texto que diz ao modelo
+  // qual imagem é de quem. Avisos de problema vão pro próprio nó.
+  async function loadReferences(
+    flowId: string,
+    imageNodeId: string,
+    model: ImageModel,
+    wantedFidelity: InputFidelity | undefined,
+    scene: string,
+  ): Promise<PreparedReferences | null> {
+    const notice = (message: string) => updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: message }))
+    const slice = get().flowsData[flowId]
+    if (!slice) return null
+    const nodes = connectedReferenceNodes(slice, imageNodeId)
+    if (nodes.length === 0) return { prompt: scene, inputs: [], sourceRefs: [] }
+
+    if (!supportsReferences(model)) {
+      notice(
+        `${MODEL_LABELS[model]} não aceita imagens de referência. Escolha GPT Image 1.5, GPT Image 1 ou GPT Image 1 Mini, ou desconecte as referências.`,
+      )
+      return null
+    }
+    const empty = nodes.find((n) => n.data.images.length === 0)
+    if (empty) {
+      notice(`O nó de referência "${empty.data.label || 'sem nome'}" está sem fotos.`)
+      return null
+    }
+    const total = nodes.reduce((sum, n) => sum + n.data.images.length, 0)
+    if (total > DEFAULT_MAX_REFERENCES) {
+      notice(`São ${total} fotos de referência conectadas; o limite é ${DEFAULT_MAX_REFERENCES} por geração.`)
+      return null
+    }
+
+    const inputs: ReferenceImageInput[] = []
+    const sourceRefs: NonNullable<AssetSource['references']> = []
+    try {
+      for (const node of nodes) {
+        for (const img of node.data.images) {
+          const bytes = await readReferenceBytes(img)
+          inputs.push({
+            sha256: img.sha256,
+            mimeType: img.mimeType,
+            byteLength: bytes.byteLength,
+            width: img.width,
+            height: img.height,
+            b64: bytesToBase64(bytes),
+          })
+          sourceRefs.push({ assetId: img.assetId, sha256: img.sha256, label: node.data.label, role: node.data.role })
+        }
+      }
+    } catch (err) {
+      notice(`Referência indisponível: ${errorMessage(err, 'erro ao ler a foto')}.`)
+      return null
+    }
+
+    const groups = nodes.map((n) => ({
+      label: n.data.label,
+      role: n.data.role,
+      preserveClothing: n.data.preserveClothing,
+      imageCount: n.data.images.length,
+    }))
+    return {
+      prompt: buildReferencePrompt(scene, groups),
+      inputs,
+      sourceRefs,
+      inputFidelity: effectiveFidelity(model, wantedFidelity),
+    }
   }
 
   function applyRestored(restored: RestoredProject[], persistence: PersistenceMode, issue: StorageIssue | null) {
@@ -436,8 +657,16 @@ export const useFlowStore = create<FlowState>((set, get) => {
     },
 
     onConnect: (flowId, connection) => {
+      if (!isValidFlowConnection(connection)) return
       updateFlowSlice(flowId, (slice) => {
-        // só uma conexão de entrada por nó de imagem: tira a anterior antes de puxar outra
+        if (connection.targetHandle === REFERENCE_EDGE_HANDLE) {
+          // várias referências por nó de imagem; só não repete a mesma
+          const duplicate = slice.edges.some(
+            (e) => e.source === connection.source && e.target === connection.target && e.targetHandle === REFERENCE_EDGE_HANDLE,
+          )
+          return duplicate ? slice : { ...slice, edges: addEdge({ ...connection, animated: false }, slice.edges) }
+        }
+        // só um prompt por nó de imagem: tira o anterior antes de puxar outro
         const filtered = slice.edges.filter(
           (e) => !(e.target === connection.target && e.targetHandle === connection.targetHandle),
         )
@@ -465,6 +694,69 @@ export const useFlowStore = create<FlowState>((set, get) => {
         dragHandle: '.ifs-node__header',
       }
       updateFlowSlice(flowId, (slice) => ({ ...slice, nodes: [...slice.nodes, node] }))
+    },
+
+    addReferenceNode: (flowId, position) => {
+      const node: ReferenceFlowNode = {
+        id: nextId('reference'),
+        type: 'reference',
+        position,
+        data: { label: '', role: 'character', preserveClothing: false, images: [] },
+        dragHandle: '.ifs-node__header',
+      }
+      updateFlowSlice(flowId, (slice) => ({ ...slice, nodes: [...slice.nodes, node] }))
+    },
+
+    updateReferenceData: (flowId, id, partial) => {
+      updateReferenceNode(flowId, id, (data) => ({ ...data, ...partial }))
+    },
+
+    addReferenceImages: async (flowId, nodeId, files) => {
+      const errors: string[] = []
+      for (const file of files) {
+        const node = findReferenceNode(flowId, nodeId)
+        if (!node) return
+        if (node.data.images.length >= DEFAULT_MAX_REFERENCES) {
+          errors.push(`${file.name}: limite de ${DEFAULT_MAX_REFERENCES} fotos por nó`)
+          continue
+        }
+        const result = await ingestReferenceFile(flowId, nodeId, file)
+        if ('error' in result) {
+          errors.push(result.error)
+          continue
+        }
+        if (findReferenceNode(flowId, nodeId)?.data.images.some((img) => img.sha256 === result.image.sha256)) {
+          errors.push(`${file.name}: essa foto já está neste nó`)
+          continue
+        }
+        updateReferenceNode(flowId, nodeId, (data) => ({ ...data, images: [...data.images, result.image] }))
+      }
+      updateReferenceNode(flowId, nodeId, (data) => ({ ...data, notice: errors.length ? errors.join(' · ') : undefined }))
+      // nó apagado durante o upload: não deixa arquivo sem dono
+      if (!findReferenceNode(flowId, nodeId)) await discardAssets(flowId, [])
+      else if (isPersistent()) await persistNow(flowId)
+    },
+
+    replaceReferenceImage: async (flowId, nodeId, imageId, file) => {
+      const old = findReferenceNode(flowId, nodeId)?.data.images.find((img) => img.id === imageId)
+      if (!old) return
+      const result = await ingestReferenceFile(flowId, nodeId, file)
+      if ('error' in result) {
+        updateReferenceNode(flowId, nodeId, (data) => ({ ...data, notice: result.error }))
+        return
+      }
+      updateReferenceNode(flowId, nodeId, (data) => ({
+        ...data,
+        notice: undefined,
+        images: data.images.map((img) => (img.id === imageId ? { ...result.image, id: imageId } : img)),
+      }))
+      await discardAssets(flowId, old.assetId && old.assetId !== result.image.assetId ? [old.assetId] : [])
+    },
+
+    removeReferenceImage: (flowId, nodeId, imageId) => {
+      const assetId = findReferenceNode(flowId, nodeId)?.data.images.find((img) => img.id === imageId)?.assetId
+      updateReferenceNode(flowId, nodeId, (data) => ({ ...data, images: data.images.filter((img) => img.id !== imageId) }))
+      void discardAssets(flowId, assetId ? [assetId] : [])
     },
 
     deleteNode: (flowId, id) => {
@@ -570,18 +862,32 @@ export const useFlowStore = create<FlowState>((set, get) => {
     generate: async (flowId, imageNodeId) => {
       const prepared = prepareGeneration(flowId, imageNodeId)
       if (!prepared) return
-      const { node, prompt, config, provider, ctx } = prepared
+      const { node, config, provider } = prepared
+      let { prompt, ctx } = prepared
 
       const previousSlots = node.data.images
       const aspect = resolveAspect(config)
       const count = clampCount(node.data.count)
       const setNotice = (notice: string) => updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice }))
 
+      // referências conectadas: as fotos vão junto (só espera quando existem)
+      let refs: PreparedReferences | null = null
+      if (hasReferenceEdges(flowId, imageNodeId)) {
+        refs = await loadReferences(flowId, imageNodeId, config.model, node.data.inputFidelity, prompt)
+        if (!refs) return
+        prompt = refs.prompt
+        ctx = { ...ctx, prompt, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
+      }
+      const refJob = refs?.inputs.length
+        ? { references: refs.inputs.map(toDescriptor), ...(refs.inputFidelity ? { inputFidelity: refs.inputFidelity } : {}) }
+        : {}
+
       // provedor pago: orçamento + confirmação ANTES de mexer nas imagens
       let quoteId: string | undefined
       if (provider.quoteImages) {
         setNotice('Calculando o custo estimado…')
-        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: count }, `Gerar ${count} imagem(ns)`, setNotice)
+        const title = `Gerar ${count} imagem(ns)${refs?.inputs.length ? ` com ${refs.inputs.length} referência(s)` : ''}`
+        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: count, ...refJob }, title, setNotice)
         if (confirmed === null || !findImageNode(flowId, imageNodeId)) return
         quoteId = confirmed
       }
@@ -594,7 +900,16 @@ export const useFlowStore = create<FlowState>((set, get) => {
         images: slotIds.map((id) => ({ id, status: 'loading', aspect })),
       }))
 
-      const results = await runGeneration({ provider, config, prompt, count: slotIds.length, crop: cropToAspect, quoteId })
+      const results = await runGeneration({
+        provider,
+        config,
+        prompt,
+        count: slotIds.length,
+        crop: cropToAspect,
+        quoteId,
+        references: refs?.inputs.length ? refs.inputs : undefined,
+        inputFidelity: refs?.inputFidelity,
+      })
       const saved = await Promise.all(
         results.map((r, i) =>
           r.ok ? saveGeneratedImage(flowId, imageNodeId, slotIds[i], r.image, ctx) : Promise.resolve(null),
@@ -649,14 +964,26 @@ export const useFlowStore = create<FlowState>((set, get) => {
     regenerateSlot: async (flowId, imageNodeId, slotId) => {
       const prepared = prepareGeneration(flowId, imageNodeId)
       if (!prepared) return
-      const { node, prompt, config, provider, ctx } = prepared
+      const { node, config, provider } = prepared
+      let { prompt, ctx } = prepared
 
       const previous = node.data.images.find((s) => s.id === slotId)
       if (!previous) return
 
+      let refs: PreparedReferences | null = null
+      if (hasReferenceEdges(flowId, imageNodeId)) {
+        refs = await loadReferences(flowId, imageNodeId, config.model, node.data.inputFidelity, prompt)
+        if (!refs) return
+        prompt = refs.prompt
+        ctx = { ...ctx, prompt, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
+      }
+      const refJob = refs?.inputs.length
+        ? { references: refs.inputs.map(toDescriptor), ...(refs.inputFidelity ? { inputFidelity: refs.inputFidelity } : {}) }
+        : {}
+
       let quoteId: string | undefined
       if (provider.quoteImages) {
-        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: 1 }, 'Gerar de novo 1 imagem', (notice) =>
+        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: 1, ...refJob }, 'Gerar de novo 1 imagem', (notice) =>
           updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice })),
         )
         if (confirmed === null || !findImageNode(flowId, imageNodeId)?.data.images.some((s) => s.id === slotId)) return
@@ -673,7 +1000,16 @@ export const useFlowStore = create<FlowState>((set, get) => {
         aspect: resolveAspect(config),
       }))
 
-      const [result] = await runGeneration({ provider, config, prompt, count: 1, crop: cropToAspect, quoteId })
+      const [result] = await runGeneration({
+        provider,
+        config,
+        prompt,
+        count: 1,
+        crop: cropToAspect,
+        quoteId,
+        references: refs?.inputs.length ? refs.inputs : undefined,
+        inputFidelity: refs?.inputFidelity,
+      })
 
       if (result?.ok) {
         const saved = await saveGeneratedImage(flowId, imageNodeId, slotId, result.image, ctx)

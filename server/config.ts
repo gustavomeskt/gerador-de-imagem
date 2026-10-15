@@ -1,4 +1,5 @@
 import { isImageModel, MODEL_LABELS, type ImageModel } from '../src/generation/models'
+import { DEFAULT_MAX_REFERENCE_BYTES, DEFAULT_MAX_REFERENCES, REFERENCE_SUPPORT } from '../src/generation/references'
 
 // Configuração do servidor, lida SÓ de variáveis de ambiente (arquivo .env na
 // raiz, que não vai pro repositório). Os padrões são os mais seguros:
@@ -18,6 +19,11 @@ export interface ServerConfig {
   allowedOrigins: string[]
   allowedModels: ImageModel[]
   maxBodyBytes: number
+  // geração com referências (fotos em base64): limite maior, calculado a
+  // partir do número e do tamanho máximo das referências
+  maxEditBodyBytes: number
+  maxReferenceImages: number
+  maxReferenceBytes: number
   imageTimeoutMs: number
   textTimeoutMs: number
   maxConcurrent: number
@@ -102,6 +108,12 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     'http://127.0.0.1:5173',
   ]
 
+  const maxReferenceImages = readNumber(env, 'MAX_REFERENCE_IMAGES', DEFAULT_MAX_REFERENCES, { min: 1, max: 16 })
+  const maxReferenceBytes =
+    readNumber(env, 'MAX_REFERENCE_FILE_MB', DEFAULT_MAX_REFERENCE_BYTES / 1024 / 1024, { min: 0.1, max: 50 }) * 1024 * 1024
+  // base64 ocupa 4/3 do tamanho original, + folga pro resto do JSON
+  const computedEditLimit = Math.ceil((maxReferenceImages * maxReferenceBytes * 4) / 3) + 1024 * 1024
+
   return {
     mode,
     openaiApiKey,
@@ -111,6 +123,9 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     allowedOrigins,
     allowedModels,
     maxBodyBytes: readNumber(env, 'MAX_BODY_BYTES', 128 * 1024, { min: 1024, max: 50 * 1024 * 1024 }),
+    maxEditBodyBytes: readNumber(env, 'MAX_EDIT_BODY_BYTES', computedEditLimit, { min: 1024, max: 1100 * 1024 * 1024 }),
+    maxReferenceImages,
+    maxReferenceBytes,
     imageTimeoutMs: readNumber(env, 'OPENAI_IMAGE_TIMEOUT_MS', 180_000, { min: 1000, max: 600_000 }),
     textTimeoutMs: readNumber(env, 'OPENAI_TEXT_TIMEOUT_MS', 60_000, { min: 1000, max: 600_000 }),
     maxConcurrent: readNumber(env, 'MAX_CONCURRENT_REQUESTS', 2, { min: 1, max: 20 }),
@@ -143,6 +158,9 @@ export function publicConfig(config: ServerConfig) {
       dailyBudgetUsd: config.dailyBudgetUsd,
       quoteTtlSeconds: config.quoteTtlMs / 1000,
       maxBodyBytes: config.maxBodyBytes,
+      maxReferenceImages: config.maxReferenceImages,
+      maxReferenceBytes: config.maxReferenceBytes,
     },
+    referenceModels: config.allowedModels.filter((m) => REFERENCE_SUPPORT[m] !== null),
   }
 }

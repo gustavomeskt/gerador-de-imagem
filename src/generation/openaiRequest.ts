@@ -1,4 +1,5 @@
 import { isGptImageModel } from './models'
+import { base64ToBytes, extensionFor } from '../lib/binary'
 import type { ImageGenerationRequest } from './types'
 
 // Regras de montagem dos pedidos pra API da OpenAI, preservadas do cliente
@@ -19,6 +20,26 @@ export function buildOpenAIImageBody(request: ImageGenerationRequest): Record<st
   }
 
   return body
+}
+
+// Edição com imagens de referência (POST /v1/images/edits, multipart): cada
+// foto vai como um arquivo no campo "image[]", na mesma ordem das
+// referências. input_fidelity só é enviado quando o modelo aceita escolher.
+export function buildOpenAIEditForm(request: ImageGenerationRequest): FormData {
+  const refs = request.references ?? []
+  if (refs.length === 0) throw new Error('Edição sem imagens de referência.')
+  const form = new FormData()
+  form.append('model', request.model)
+  form.append('prompt', request.prompt)
+  form.append('n', String(request.n))
+  form.append('size', request.size)
+  if (request.quality) form.append('quality', request.quality)
+  if (request.inputFidelity) form.append('input_fidelity', request.inputFidelity)
+  refs.forEach((ref, i) => {
+    const bytes = base64ToBytes(ref.b64)
+    form.append('image[]', new Blob([bytes as BlobPart], { type: ref.mimeType }), `referencia-${i + 1}.${extensionFor(ref.mimeType)}`)
+  })
+  return form
 }
 
 // Modelo de texto usado só pra reescrever/detalhar o prompt antes de gerar a

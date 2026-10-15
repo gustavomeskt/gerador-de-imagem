@@ -126,9 +126,15 @@ export function createMockProvider(options: MockProviderOptions = {}): ImageProv
         throw new ProviderError('Erro simulado pelo provedor de teste.')
       }
 
+      // com referências, mostra na imagem quantas chegaram (e o começo do
+      // hash de cada uma) — confirma que as fotos foram usadas no pedido
+      const refs = request.references ?? []
+      const prompt = refs.length
+        ? `[${refs.length} referência(s): ${refs.map((r) => `${r.width}x${r.height} ${r.sha256.slice(0, 8)}`).join(' | ')}] ${request.prompt}`
+        : request.prompt
       return Array.from({ length: request.n }, () => {
         sequence += 1
-        const svg = renderMockSvg({ ...request, index: sequence })
+        const svg = renderMockSvg({ ...request, prompt, index: sequence })
         return { src: `data:image/svg+xml;base64,${toBase64Utf8(svg)}`, mimeType: 'image/svg+xml' }
       })
     },

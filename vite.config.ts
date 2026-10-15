@@ -4,6 +4,11 @@ import { defineConfig } from 'vitest/config'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  build: {
+    // o pacote principal (~510 kB, ~165 kB gzip) é quase todo React Flow; o
+    // JSZip já é carregado sob demanda. App local: 600 kB evita aviso à toa.
+    chunkSizeWarningLimit: 600,
+  },
   server: {
     proxy: {
       // Rotas do backend local (pasta server/, que guarda a chave da OpenAI).

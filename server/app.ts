@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { MODEL_MAX_N } from '../src/generation/models'
+import type { ReferenceDescriptor } from '../src/generation/references'
 import type { CostQuote } from '../src/generation/types'
 import { publicConfig, type ServerConfig } from './config'
 import { HttpError, readJsonBody, sendError, sendJson } from './http'
@@ -80,8 +81,25 @@ function toQuoteResponse(q: QuoteRecord, deps: AppDeps, breakdown: string[], not
   }
 }
 
-function imageFingerprint(p: { model: string; prompt: string; size: string; quality?: string }) {
-  return fingerprint({ kind: 'images', model: p.model, prompt: p.prompt, size: p.size, quality: p.quality })
+// O orçamento vale só para exatamente este pedido — inclusive as mesmas
+// referências (pelo hash dos bytes), na mesma ordem, e a mesma fidelidade.
+function imageFingerprint(p: {
+  model: string
+  prompt: string
+  size: string
+  quality?: string
+  references?: ReferenceDescriptor[]
+  inputFidelity?: string
+}) {
+  return fingerprint({
+    kind: 'images',
+    model: p.model,
+    prompt: p.prompt,
+    size: p.size,
+    quality: p.quality,
+    references: (p.references ?? []).map((r) => [r.sha256, r.mimeType, r.byteLength, r.width, r.height]),
+    inputFidelity: p.inputFidelity,
+  })
 }
 
 function quoteIdFrom(req: IncomingMessage): string | undefined {
@@ -155,14 +173,17 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: AppDeps) {
 
     case '/api/images/generate': {
       allow('POST')
-      const request = validateGenerateBody(await readJsonBody(req, config.maxBodyBytes), config)
+      // limite maior: as fotos de referência vêm no corpo (base64)
+      const request = validateGenerateBody(await readJsonBody(req, config.maxEditBodyBytes), config)
       deps.rateLimiter.check()
       const usd = deps.quotes.consume(quoteIdFrom(req), {
         kind: 'images',
         fingerprint: imageFingerprint(request),
         images: request.n,
       })
-      const images = await runPaid(deps, request.n, usd, () => deps.client.generateImages(request))
+      const images = await runPaid(deps, request.n, usd, () =>
+        request.references ? deps.client.editImages(request) : deps.client.generateImages(request),
+      )
       return sendJson(res, 200, { images })
     }
 

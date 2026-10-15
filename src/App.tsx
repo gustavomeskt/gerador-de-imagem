@@ -9,11 +9,12 @@ import NodeDock from './components/NodeDock'
 import StorageBanner from './components/StorageBanner'
 import ImageNode from './nodes/ImageNode'
 import PromptNode from './nodes/PromptNode'
+import ReferenceNode from './nodes/ReferenceNode'
 import { FlowIdContext } from './store/flowIdContext'
-import { useFlowStore } from './store/useFlowStore'
+import { isValidFlowConnection, useFlowStore } from './store/useFlowStore'
 import './index.css'
 
-const nodeTypes = { prompt: PromptNode, image: ImageNode }
+const nodeTypes = { prompt: PromptNode, image: ImageNode, reference: ReferenceNode }
 
 function FlowCanvas({ flowId, onBack }: { flowId: string; onBack: () => void }) {
   const nodes = useFlowStore((s) => s.flowsData[flowId]?.nodes ?? [])
@@ -32,6 +33,7 @@ function FlowCanvas({ flowId, onBack }: { flowId: string; onBack: () => void }) 
         onNodesChange={(changes) => onNodesChange(flowId, changes)}
         onEdgesChange={(changes) => onEdgesChange(flowId, changes)}
         onConnect={(connection) => onConnect(flowId, connection)}
+        isValidConnection={isValidFlowConnection}
         nodeTypes={nodeTypes}
         defaultEdgeOptions={defaultEdgeOptions}
         deleteKeyCode={['Backspace', 'Delete']}

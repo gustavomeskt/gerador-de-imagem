@@ -1,5 +1,5 @@
 import { useReactFlow } from '@xyflow/react'
-import { ImagePlus, MessageSquarePlus } from 'lucide-react'
+import { ImagePlus, MessageSquarePlus, UserRoundPlus } from 'lucide-react'
 import { useFlowId } from '../store/flowIdContext'
 import { useFlowStore } from '../store/useFlowStore'
 
@@ -8,6 +8,7 @@ export default function NodeDock() {
   const { screenToFlowPosition } = useReactFlow()
   const addPromptNode = useFlowStore((s) => s.addPromptNode)
   const addImageNode = useFlowStore((s) => s.addImageNode)
+  const addReferenceNode = useFlowStore((s) => s.addReferenceNode)
 
   function centerPosition() {
     const x = window.innerWidth / 2 + (Math.random() * 80 - 40)
@@ -32,6 +33,14 @@ export default function NodeDock() {
         onClick={() => addImageNode(flowId, centerPosition())}
       >
         <ImagePlus size={16} />
+      </button>
+      <button
+        type="button"
+        className="ifs-dock__btn"
+        title="Novo nó de referência (fotos)"
+        onClick={() => addReferenceNode(flowId, centerPosition())}
+      >
+        <UserRoundPlus size={16} />
       </button>
     </div>
   )

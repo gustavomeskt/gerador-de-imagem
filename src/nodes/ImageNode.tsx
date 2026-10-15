@@ -19,6 +19,7 @@ import {
   MODEL_SIZES,
   type ImageModel,
 } from '../generation/models'
+import { REFERENCE_SUPPORT, type InputFidelity } from '../generation/references'
 import { useFlowId } from '../store/flowIdContext'
 import { useFlowStore, type ImageNodeData, type ImageSlot } from '../store/useFlowStore'
 
@@ -31,6 +32,21 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
   const deleteSlot = useFlowStore((s) => s.deleteSlot)
   const deleteNode = useFlowStore((s) => s.deleteNode)
 
+  // nós de referência conectados e o total de fotos deles (string pra o
+  // seletor devolver um valor estável)
+  const referenceSummary = useFlowStore((s) => {
+    const slice = s.flowsData[flowId]
+    const sources = new Set(
+      (slice?.edges ?? []).filter((e) => e.target === id && e.targetHandle === 'refs-in').map((e) => e.source),
+    )
+    const photos = (slice?.nodes ?? []).reduce(
+      (sum, n) => (sources.has(n.id) && n.type === 'reference' ? sum + n.data.images.length : sum),
+      0,
+    )
+    return `${sources.size}:${photos}`
+  })
+  const [referenceCount, referencePhotos] = referenceSummary.split(':').map(Number)
+  const refSupport = REFERENCE_SUPPORT[data.model]
   const qualities = MODEL_QUALITIES[data.model]
   const sizes = MODEL_SIZES[data.model]
   const isGenerating = data.images.some((img) => img.status === 'loading')
@@ -70,7 +86,15 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
         }}
       />
 
-      <Handle type="target" position={Position.Left} id="prompt-in" className="ifs-handle" />
+      <Handle type="target" position={Position.Left} id="prompt-in" className="ifs-handle" style={{ top: 40 }} title="Prompt" />
+      <Handle
+        type="target"
+        position={Position.Left}
+        id="refs-in"
+        className="ifs-handle ifs-handle--ref"
+        style={{ top: 72 }}
+        title="Imagens de referência (pode conectar várias)"
+      />
 
       <div className="ifs-node__header">
         <div className="ifs-node__header-title">
@@ -149,6 +173,36 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
           Gerar
         </button>
       </div>
+
+      {referenceCount > 0 && (
+        <div className="ifs-image__refs nodrag">
+          {refSupport ? (
+            <>
+              <span>
+                {referencePhotos} foto(s) de referência ({referenceCount} nó{referenceCount > 1 ? 's' : ''}) — vão junto no pedido
+              </span>
+              {refSupport.fidelity.length > 1 ? (
+                <label>
+                  Fidelidade
+                  <select
+                    value={data.inputFidelity ?? 'high'}
+                    onChange={(e) => updateImageConfig(flowId, id, { inputFidelity: e.target.value as InputFidelity })}
+                  >
+                    <option value="high">Alta (preserva rosto e traços)</option>
+                    <option value="low">Baixa (mais barata)</option>
+                  </select>
+                </label>
+              ) : (
+                <span className="ifs-image__refs-note">fidelidade padrão (este modelo não permite alta)</span>
+              )}
+            </>
+          ) : (
+            <span className="ifs-image__refs-warn">
+              {MODEL_LABELS[data.model]} não aceita referências — escolha um modelo GPT Image.
+            </span>
+          )}
+        </div>
+      )}
 
       {data.notice && <div className="ifs-image__notice">{data.notice}</div>}
 

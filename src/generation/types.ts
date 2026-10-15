@@ -1,4 +1,5 @@
 import type { ImageModel } from './models'
+import type { InputFidelity, ReferenceDescriptor, ReferenceImageInput } from './references'
 
 // Contrato que todo provedor de geração implementa. A interface e o store só
 // conversam com essa interface — nunca com a API da OpenAI diretamente — pra
@@ -13,6 +14,9 @@ export interface ImageGenerationRequest {
   size: string // tamanho no formato da API, ex. "1024x1536"
   quality?: string
   n: number // já respeita o máximo por chamada do modelo
+  // com referências a chamada vai pro endpoint de edição (as fotos vão junto)
+  references?: ReferenceImageInput[]
+  inputFidelity?: InputFidelity
 }
 
 export interface GeneratedImage {
@@ -30,6 +34,10 @@ export interface ImageJob {
   size: string
   quality?: string
   totalImages: number
+  // só a identificação das referências (hash, tipo, tamanho, dimensões) —
+  // os bytes só vão na chamada de geração
+  references?: ReferenceDescriptor[]
+  inputFidelity?: InputFidelity
 }
 
 // Orçamento devolvido pelo backend. O id (quoteId) precisa acompanhar as

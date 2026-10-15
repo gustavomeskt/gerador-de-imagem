@@ -54,7 +54,22 @@ export function extensionFor(mimeType: string | undefined): string {
   return MIME_EXTENSIONS[mimeType ?? ''] ?? 'png'
 }
 
-// Dimensões em pixels lidas do cabeçalho do arquivo (PNG, JPEG, SVG).
+// Tipo real do arquivo pelos primeiros bytes ("assinatura"), sem confiar na
+// extensão nem no tipo informado pelo navegador.
+export function sniffImageType(bytes: Uint8Array): 'image/png' | 'image/jpeg' | 'image/webp' | undefined {
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  if (
+    bytes.length >= 12 &&
+    String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF' &&
+    String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP'
+  ) {
+    return 'image/webp'
+  }
+  return undefined
+}
+
+// Dimensões em pixels lidas do cabeçalho do arquivo (PNG, JPEG, WebP, SVG).
 export function readImageSize(bytes: Uint8Array, mimeType: string): { width: number; height: number } | undefined {
   if (mimeType === 'image/png' && bytes.length >= 24) {
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
@@ -77,6 +92,25 @@ export function readImageSize(bytes: Uint8Array, mimeType: string): { width: num
         return { height: view.getUint16(offset + 5), width: view.getUint16(offset + 7) }
       }
       offset += 2 + length
+    }
+    return undefined
+  }
+
+  if (mimeType === 'image/webp' && bytes.length >= 30) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+    const chunk = String.fromCharCode(...bytes.subarray(12, 16))
+    if (chunk === 'VP8X') {
+      // largura/altura - 1, em 24 bits little-endian
+      const w = 1 + (bytes[24] | (bytes[25] << 8) | (bytes[26] << 16))
+      const h = 1 + (bytes[27] | (bytes[28] << 8) | (bytes[29] << 16))
+      return { width: w, height: h }
+    }
+    if (chunk === 'VP8 ' && bytes[23] === 0x9d && bytes[24] === 0x01 && bytes[25] === 0x2a) {
+      return { width: view.getUint16(26, true) & 0x3fff, height: view.getUint16(28, true) & 0x3fff }
+    }
+    if (chunk === 'VP8L' && bytes[20] === 0x2f) {
+      const bits = view.getUint32(21, true)
+      return { width: (bits & 0x3fff) + 1, height: ((bits >> 14) & 0x3fff) + 1 }
     }
     return undefined
   }

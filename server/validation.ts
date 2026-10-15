@@ -1,4 +1,15 @@
 import { MODEL_MAX_N, MODEL_PROMPT_LIMITS, MODEL_QUALITIES, MODEL_SIZES, type ImageModel } from '../src/generation/models'
+import { createHash } from 'node:crypto'
+import {
+  checkReferenceFile,
+  effectiveFidelity,
+  REFERENCE_MIME_TYPES,
+  REFERENCE_SUPPORT,
+  type InputFidelity,
+  type ReferenceDescriptor,
+  type ReferenceImageInput,
+  type ReferenceMimeType,
+} from '../src/generation/references'
 import type { ImageGenerationRequest, ImageJob } from '../src/generation/types'
 import type { ServerConfig } from './config'
 import { HttpError } from './http'
@@ -10,8 +21,6 @@ import { HttpError } from './http'
 // Campos que existirão em etapas futuras. Hoje são recusados com mensagem
 // clara, em vez de ignorados em silêncio.
 const FUTURE_FIELDS: Record<string, string> = {
-  references: 'imagens de referência',
-  referenceImages: 'imagens de referência',
   characters: 'personagens',
   scenes: 'geração de cenas',
   mask: 'máscara de edição',
@@ -83,22 +92,108 @@ function readPositiveInt(value: unknown, name: string, max: number): number {
   return value
 }
 
-// POST /api/images/generate — uma chamada à API (n já respeita o limite do modelo)
-export function validateGenerateBody(body: unknown, config: ServerConfig): ImageGenerationRequest {
-  const obj = asObject(body)
-  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'n'])
-  const params = readImageParams(obj, config)
-  const n = readPositiveInt(obj.n, 'n', Math.min(MODEL_MAX_N[params.model], config.maxImagesPerJob))
-  return { ...params, n }
+// --- imagens de referência ------------------------------------------------
+
+function referencesArray(value: unknown, config: ServerConfig, model: ImageModel): unknown[] | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!Array.isArray(value) || value.length === 0) invalid('"references" precisa ser uma lista com pelo menos uma imagem.')
+  if (!REFERENCE_SUPPORT[model]) {
+    throw new HttpError(
+      400,
+      'references_not_supported',
+      `O modelo ${model} não aceita imagens de referência. Use gpt-image-1.5, gpt-image-1 ou gpt-image-1-mini.`,
+    )
+  }
+  const limit = Math.min(config.maxReferenceImages, REFERENCE_SUPPORT[model]!.maxImages)
+  if (value.length > limit) invalid(`No máximo ${limit} imagens de referência por geração.`)
+  return value
 }
 
-// POST /api/images/quote — orçamento de um trabalho inteiro (todas as imagens de um nó)
+function readFidelity(value: unknown, model: ImageModel, hasReferences: boolean): InputFidelity | undefined {
+  if (value === undefined || value === null) return undefined
+  if (!hasReferences) invalid('"inputFidelity" só pode ser usado com imagens de referência.')
+  const support = REFERENCE_SUPPORT[model]
+  if (typeof value !== 'string' || !support?.fidelity.includes(value as InputFidelity)) {
+    invalid(`"inputFidelity" inválido para ${model}. Aceitos: ${support?.fidelity.join(', ') ?? 'nenhum'}.`)
+  }
+  // o mini só tem "low" (padrão da API): não precisa mandar
+  return effectiveFidelity(model, value as InputFidelity)
+}
+
+const BASE64_RE = /^[A-Za-z0-9+/]+={0,2}$/
+
+// Decodifica e confere cada referência pelos BYTES (assinatura do arquivo),
+// sem confiar no tipo declarado. Só aceita dados enviados no corpo — nunca
+// URLs (o servidor não baixa nada de fora).
+function readReferenceImages(list: unknown[], config: ServerConfig): ReferenceImageInput[] {
+  return list.map((item, i) => {
+    const label = `Referência ${i + 1}`
+    if (!item || typeof item !== 'object' || Array.isArray(item)) invalid(`${label}: formato inválido.`)
+    const ref = item as Record<string, unknown>
+    for (const key of Object.keys(ref)) {
+      if (key !== 'mimeType' && key !== 'b64') invalid(`${label}: campo não permitido "${key}" (envie só mimeType e b64; URLs não são aceitas).`)
+    }
+    if (typeof ref.b64 !== 'string' || !ref.b64 || !BASE64_RE.test(ref.b64)) invalid(`${label}: dados da imagem ausentes ou fora do formato base64.`)
+    if ((ref.b64.length * 3) / 4 > config.maxReferenceBytes + 3) {
+      invalid(`${label}: arquivo maior que ${Math.round(config.maxReferenceBytes / 1024 / 1024)} MB.`)
+    }
+    const bytes = new Uint8Array(Buffer.from(ref.b64, 'base64'))
+    const check = checkReferenceFile(bytes, config.maxReferenceBytes)
+    if (!check.ok) invalid(`${label}: ${check.error}.`)
+    if (ref.mimeType !== check.mimeType) invalid(`${label}: o conteúdo não corresponde ao tipo declarado (${String(ref.mimeType)}).`)
+    return {
+      sha256: createHash('sha256').update(bytes).digest('hex'),
+      mimeType: check.mimeType,
+      byteLength: bytes.byteLength,
+      width: check.width,
+      height: check.height,
+      b64: ref.b64,
+    }
+  })
+}
+
+function readReferenceDescriptors(list: unknown[], config: ServerConfig): ReferenceDescriptor[] {
+  return list.map((item, i) => {
+    const label = `Referência ${i + 1}`
+    if (!item || typeof item !== 'object' || Array.isArray(item)) invalid(`${label}: formato inválido.`)
+    const ref = item as Record<string, unknown>
+    for (const key of Object.keys(ref)) {
+      if (!['sha256', 'mimeType', 'byteLength', 'width', 'height'].includes(key)) invalid(`${label}: campo não permitido "${key}".`)
+    }
+    if (typeof ref.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(ref.sha256)) invalid(`${label}: sha256 inválido.`)
+    if (!REFERENCE_MIME_TYPES.includes(ref.mimeType as ReferenceMimeType)) invalid(`${label}: tipo não suportado (use PNG, JPG ou WebP).`)
+    const byteLength = readPositiveInt(ref.byteLength, `${label}.byteLength`, config.maxReferenceBytes)
+    const width = readPositiveInt(ref.width, `${label}.width`, 20000)
+    const height = readPositiveInt(ref.height, `${label}.height`, 20000)
+    return { sha256: ref.sha256 as string, mimeType: ref.mimeType as ReferenceMimeType, byteLength, width, height }
+  })
+}
+
+// POST /api/images/generate — uma chamada à API (n já respeita o limite do modelo).
+// Com "references", vira uma edição com as fotos (endpoint /v1/images/edits).
+export function validateGenerateBody(body: unknown, config: ServerConfig): ImageGenerationRequest {
+  const obj = asObject(body)
+  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'n', 'references', 'inputFidelity'])
+  const params = readImageParams(obj, config)
+  const n = readPositiveInt(obj.n, 'n', Math.min(MODEL_MAX_N[params.model], config.maxImagesPerJob))
+  const list = referencesArray(obj.references, config, params.model)
+  const references = list ? readReferenceImages(list, config) : undefined
+  const inputFidelity = readFidelity(obj.inputFidelity, params.model, !!references)
+  return { ...params, n, ...(references ? { references } : {}), ...(inputFidelity ? { inputFidelity } : {}) }
+}
+
+// POST /api/images/quote — orçamento de um trabalho inteiro (todas as imagens
+// de um nó). As referências vêm só identificadas (hash, tipo, tamanho,
+// dimensões); a chamada de geração precisa trazer exatamente esses arquivos.
 export function validateImageJob(body: unknown, config: ServerConfig): ImageJob {
   const obj = asObject(body)
-  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'totalImages'])
+  rejectUnknownFields(obj, ['model', 'prompt', 'size', 'quality', 'totalImages', 'references', 'inputFidelity'])
   const params = readImageParams(obj, config)
   const totalImages = readPositiveInt(obj.totalImages, 'totalImages', config.maxImagesPerJob)
-  return { ...params, totalImages }
+  const list = referencesArray(obj.references, config, params.model)
+  const references = list ? readReferenceDescriptors(list, config) : undefined
+  const inputFidelity = readFidelity(obj.inputFidelity, params.model, !!references)
+  return { ...params, totalImages, ...(references ? { references } : {}), ...(inputFidelity ? { inputFidelity } : {}) }
 }
 
 // POST /api/prompts/enhance e /api/prompts/quote

@@ -20,7 +20,15 @@ function storedAsset(id: string, label: string, nodeId: string): AssetRecord {
     width: 864,
     height: 1536,
     createdAt: Date.UTC(2026, 0, 1, 12),
-    source: { nodeId, slotId: `slot-${id}`, prompt: `prompt ${label}`, model: 'gpt-image-1.5', size: '1024x1536', provider: 'mock' },
+    source: {
+      nodeId,
+      slotId: `slot-${id}`,
+      prompt: `prompt ${label}`,
+      model: 'gpt-image-1.5',
+      size: '1024x1536',
+      provider: 'mock',
+      ...(id === 'a1' ? { references: [{ assetId: 'r1', sha256: 'abc', label: 'Maria', role: 'character' }], inputFidelity: 'high' } : {}),
+    },
   }
 }
 
@@ -117,6 +125,9 @@ describe('exportação em ZIP', () => {
       height: 1536,
       source: { prompt: 'prompt cima-1', provider: 'mock' },
     })
+    // as referências usadas na geração ficam registradas no manifest
+    expect(manifest.images[0].source?.references).toEqual([{ assetId: 'r1', sha256: 'abc', label: 'Maria', role: 'character' }])
+    expect(manifest.images[0].source?.inputFidelity).toBe('high')
     // imagem que falhou ao salvar no banco também é exportada (vem da memória)
     expect(manifest.images[3]).toMatchObject({ slotId: 'sb3', assetId: null, width: 100, height: 100 })
     expect(manifest.skipped).toEqual([

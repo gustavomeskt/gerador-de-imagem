@@ -56,9 +56,9 @@ describe('validação de parâmetros', () => {
   })
 
   it('campos das próximas etapas são recusados com mensagem clara', async () => {
-    const message = await expectInvalid({ ...VALID_JOB, references: ['data:image/png;base64,AA'] }, 'not_supported_yet')
-    expect(message).toMatch(/imagens de referência.*ainda não é suportado/)
-    await expectInvalid({ ...VALID_JOB, characters: [] }, 'not_supported_yet')
+    const message = await expectInvalid({ ...VALID_JOB, characters: [] }, 'not_supported_yet')
+    expect(message).toMatch(/personagens.*ainda não é suportado/)
+    await expectInvalid({ ...VALID_JOB, scenes: [] }, 'not_supported_yet')
   })
 
   it('corpo que não é objeto', async () => {

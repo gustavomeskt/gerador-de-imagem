@@ -1,4 +1,5 @@
 import { getSizeOption, MODEL_MAX_N, splitIntoBatches, type ImageModel } from './models'
+import type { InputFidelity, ReferenceImageInput } from './references'
 import type { GeneratedImage, ImageProvider } from './types'
 
 // Orquestra uma geração de N imagens, independente do provedor: divide em
@@ -24,6 +25,9 @@ export interface RunGenerationParams {
   crop: CropFn
   // orçamento confirmado pela pessoa (provedores pagos)
   quoteId?: string
+  // fotos de referência (vão em todas as chamadas do trabalho)
+  references?: ReferenceImageInput[]
+  inputFidelity?: InputFidelity
 }
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -36,14 +40,21 @@ export function resolveAspect(config: ImageGenerationConfig): number {
 }
 
 export async function runGeneration(params: RunGenerationParams): Promise<ImageResult[]> {
-  const { provider, config, prompt, count, crop, quoteId } = params
+  const { provider, config, prompt, count, crop, quoteId, references, inputFidelity } = params
   const sizeOption = getSizeOption(config.model, config.size)
   const batches = splitIntoBatches(count, MODEL_MAX_N[config.model])
 
   const settled = await Promise.allSettled(
     batches.map((n) =>
       provider.generateImages(
-        { model: config.model, prompt, size: config.size, quality: config.quality, n },
+        {
+          model: config.model,
+          prompt,
+          size: config.size,
+          quality: config.quality,
+          n,
+          ...(references?.length ? { references, ...(inputFidelity ? { inputFidelity } : {}) } : {}),
+        },
         quoteId ? { quoteId } : undefined,
       ),
     ),

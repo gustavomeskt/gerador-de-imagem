@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import { MODEL_MAX_N, type ImageModel } from '../src/generation/models'
+import type { InputFidelity, ReferenceDescriptor } from '../src/generation/references'
 import { ENHANCE_MAX_PROMPT_CHARS } from './validation'
 import { PROMPT_ENHANCER_MAX_OUTPUT_TOKENS, PROMPT_ENHANCER_MODEL, PROMPT_ENHANCER_SYSTEM } from '../src/generation/openaiRequest'
 
@@ -20,6 +21,11 @@ export interface PriceTable {
   images: Record<string, Record<string, Record<string, number>>>
   // texto do prompt (modelos gpt-image): USD por 1 milhão de tokens de entrada
   imagePromptPerMTokens: Record<string, number>
+  // imagens de referência (entrada da edição): USD por 1 milhão de tokens de imagem
+  imageInputPerMTokens: Record<string, number>
+  // tokens estimados por imagem de referência (limite superior): base, e o
+  // adicional cobrado quando input_fidelity = "high"
+  referenceTokens: { base: number; highFidelityExtra: number }
   // melhorador de prompt: USD por 1 milhão de tokens
   enhancer: { inputPerMTokens: number; outputPerMTokens: number }
 }
@@ -49,6 +55,9 @@ export const DEFAULT_PRICES: PriceTable = {
     },
   },
   imagePromptPerMTokens: { 'gpt-image-1.5': 5, 'gpt-image-1': 5, 'gpt-image-1-mini': 2 },
+  // gpt-image-1.5 orçado com o valor do gpt-image-1 (limite superior)
+  imageInputPerMTokens: { 'gpt-image-1.5': 10, 'gpt-image-1': 10, 'gpt-image-1-mini': 2.5 },
+  referenceTokens: { base: 1000, highFidelityExtra: 6240 },
   enhancer: { inputPerMTokens: 0.25, outputPerMTokens: 2 },
 }
 
@@ -58,6 +67,8 @@ export function loadPriceTable(file: string | undefined): PriceTable {
   return {
     images: { ...DEFAULT_PRICES.images, ...custom.images },
     imagePromptPerMTokens: { ...DEFAULT_PRICES.imagePromptPerMTokens, ...custom.imagePromptPerMTokens },
+    imageInputPerMTokens: { ...DEFAULT_PRICES.imageInputPerMTokens, ...custom.imageInputPerMTokens },
+    referenceTokens: { ...DEFAULT_PRICES.referenceTokens, ...custom.referenceTokens },
     enhancer: { ...DEFAULT_PRICES.enhancer, ...custom.enhancer },
   }
 }
@@ -82,7 +93,15 @@ export interface Estimate {
 const usd = (v: number) => `US$ ${v.toFixed(4)}`
 
 export function estimateImageJob(
-  job: { model: ImageModel; prompt: string; size: string; quality?: string; totalImages: number },
+  job: {
+    model: ImageModel
+    prompt: string
+    size: string
+    quality?: string
+    totalImages: number
+    references?: ReferenceDescriptor[]
+    inputFidelity?: InputFidelity
+  },
   prices: PriceTable,
 ): Estimate {
   const quality = pricingQuality(job.model, job.quality)
@@ -101,6 +120,21 @@ export function estimateImageJob(
     const promptCost = (estimateTokens(job.prompt) * calls * promptRate) / 1_000_000
     total += promptCost
     breakdown.push(`texto do prompt: ~${estimateTokens(job.prompt)} tokens × ${calls} chamada(s) = ${usd(promptCost)}`)
+  }
+  // referências: as fotos são reenviadas em cada chamada e cobradas como
+  // tokens de imagem de entrada (bem mais com fidelidade alta)
+  const refs = job.references ?? []
+  if (refs.length > 0) {
+    const calls = Math.ceil(job.totalImages / MODEL_MAX_N[job.model])
+    const perImage = prices.referenceTokens.base + (job.inputFidelity === 'high' ? prices.referenceTokens.highFidelityExtra : 0)
+    const rate = prices.imageInputPerMTokens[job.model] ?? 0
+    const refCost = (refs.length * perImage * calls * rate) / 1_000_000
+    total += refCost
+    breakdown.push(
+      `${refs.length} referência(s) × ~${perImage} tokens × ${calls} chamada(s)` +
+        `${job.inputFidelity === 'high' ? ' (fidelidade alta)' : ''} = ${usd(refCost)}`,
+    )
+    notes.push('Referências orçadas pelo limite superior de tokens por imagem; o valor real tende a ser menor.')
   }
   if (!job.quality || job.quality === 'auto') notes.push('Qualidade "auto" foi orçada como "high" (pior caso).')
   if (job.model === 'gpt-image-1.5') notes.push('gpt-image-1.5 orçado com a tabela do gpt-image-1 (limite superior).')

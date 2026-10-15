@@ -53,6 +53,27 @@ export interface AssetSource {
   size: string
   quality?: string
   provider: string
+  // imagens de referência usadas nesta geração, na ordem enviada
+  references?: Array<{ assetId?: string; sha256: string; label: string; role: string }>
+  inputFidelity?: string
+}
+
+// Referência enviada pela pessoa: a que nó pertence e o nome do arquivo.
+export interface AssetReferenceInfo {
+  nodeId: string
+  name: string
+}
+
+// Foto de referência como fica salva no projeto (sem bytes nem URL).
+export interface PersistedReferenceImage {
+  id: string
+  assetId: string
+  name: string
+  mimeType: string
+  byteLength: number
+  width: number
+  height: number
+  sha256: string
 }
 
 export interface AssetRecord {
@@ -68,6 +89,9 @@ export interface AssetRecord {
   height?: number
   createdAt: number
   source?: AssetSource
+  // referências: hash do conteúdo (evita guardar a mesma foto duas vezes)
+  sha256?: string
+  reference?: AssetReferenceInfo
 }
 
 // Registro genérico das bibliotecas futuras (personagens, storyboards, cenas,

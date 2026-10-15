@@ -1,4 +1,4 @@
-import { buildEnhancerBody, buildOpenAIImageBody } from '../src/generation/openaiRequest'
+import { buildEnhancerBody, buildOpenAIEditForm, buildOpenAIImageBody } from '../src/generation/openaiRequest'
 import type { ImageGenerationRequest } from '../src/generation/types'
 import { HttpError } from './http'
 
@@ -14,10 +14,9 @@ export interface UpstreamImage {
 export interface ImageClient {
   generateImages(request: ImageGenerationRequest): Promise<UpstreamImage[]>
   enhancePrompt(prompt: string): Promise<string>
-  // Etapa futura: edição com imagens de referência (POST /v1/images/edits,
-  // multipart com várias imagens + input_fidelity). A assinatura fica aqui
-  // reservada; nenhuma rota usa isso ainda.
-  // editImages(request: ImageEditRequest): Promise<UpstreamImage[]>
+  // Geração orientada por imagens de referência (POST /v1/images/edits,
+  // multipart com as fotos em image[] + input_fidelity quando aplicável)
+  editImages(request: ImageGenerationRequest): Promise<UpstreamImage[]>
 }
 
 // Remove qualquer coisa parecida com chave de API de um texto vindo de fora
@@ -43,7 +42,9 @@ export function createOpenAIClient(options: {
 }): ImageClient {
   const { apiKey, baseUrl } = options
 
-  async function call(path: string, body: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+  // body: objeto (enviado como JSON) ou FormData (multipart — o fetch define
+  // o Content-Type com o boundary)
+  async function call(path: string, body: Record<string, unknown> | FormData, timeoutMs: number): Promise<unknown> {
     const fetchImpl = options.fetchImpl ?? fetch
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -51,8 +52,11 @@ export function createOpenAIClient(options: {
     try {
       res = await fetchImpl(`${baseUrl}${path}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(body),
+        headers:
+          body instanceof FormData
+            ? { Authorization: `Bearer ${apiKey}` }
+            : { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+        body: body instanceof FormData ? body : JSON.stringify(body),
         signal: controller.signal,
       })
     } catch (err) {
@@ -95,17 +99,22 @@ export function createOpenAIClient(options: {
     throw new HttpError(502, 'upstream_error', `Erro ${res.status} na OpenAI. ${upstreamMessage}`.trim())
   }
 
+  function readImages(raw: unknown): UpstreamImage[] {
+    const data = raw as { data?: Array<{ b64_json?: unknown }>; output_format?: unknown }
+    const images = (data?.data ?? []).flatMap((d) =>
+      typeof d?.b64_json === 'string' && d.b64_json ? [{ b64: d.b64_json, mimeType: mimeFromFormat(data.output_format) }] : [],
+    )
+    if (images.length === 0) throw new HttpError(502, 'upstream_invalid', 'A OpenAI não devolveu nenhuma imagem.')
+    return images
+  }
+
   return {
     async generateImages(request) {
-      const data = (await call('/v1/images/generations', buildOpenAIImageBody(request), options.imageTimeoutMs)) as {
-        data?: Array<{ b64_json?: unknown }>
-        output_format?: unknown
-      }
-      const images = (data?.data ?? []).flatMap((d) =>
-        typeof d?.b64_json === 'string' && d.b64_json ? [{ b64: d.b64_json, mimeType: mimeFromFormat(data.output_format) }] : [],
-      )
-      if (images.length === 0) throw new HttpError(502, 'upstream_invalid', 'A OpenAI não devolveu nenhuma imagem.')
-      return images
+      return readImages(await call('/v1/images/generations', buildOpenAIImageBody(request), options.imageTimeoutMs))
+    },
+
+    async editImages(request) {
+      return readImages(await call('/v1/images/edits', buildOpenAIEditForm(request), options.imageTimeoutMs))
     },
 
     async enhancePrompt(prompt) {
