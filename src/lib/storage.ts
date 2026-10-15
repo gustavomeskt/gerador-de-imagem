@@ -1,4 +1,11 @@
-const API_KEY_STORAGE = 'ifs.openai.apiKey'
+import { DEFAULT_PROVIDER, isProviderKind } from '../generation/providers'
+import type { ProviderKind } from '../generation/types'
+
+// Chave antiga onde a API key da OpenAI ficava salva no navegador. O app não
+// lê mais esse valor — a chave passa a morar só no backend. Mantemos o nome
+// apenas pra avisar e permitir apagar uma chave que tenha ficado salva.
+const LEGACY_API_KEY_STORAGE = 'ifs.openai.apiKey'
+const PROVIDER_STORAGE = 'ifs.provider'
 const IMAGE_PRESET_STORAGE = 'ifs.imageNode.preset'
 const FLOWS_STORAGE = 'ifs.flows'
 
@@ -9,20 +16,36 @@ export interface ImageNodePreset {
   count: number
 }
 
-export function loadApiKey(): string {
+export function hasLegacyApiKey(): boolean {
   try {
-    return localStorage.getItem(API_KEY_STORAGE) ?? ''
+    return !!localStorage.getItem(LEGACY_API_KEY_STORAGE)
   } catch {
-    return ''
+    return false
   }
 }
 
-export function saveApiKey(key: string) {
+export function removeLegacyApiKey() {
   try {
-    if (key) localStorage.setItem(API_KEY_STORAGE, key)
-    else localStorage.removeItem(API_KEY_STORAGE)
+    localStorage.removeItem(LEGACY_API_KEY_STORAGE)
   } catch {
     // localStorage indisponível (modo privado etc.) — ignora
+  }
+}
+
+export function loadProviderKind(): ProviderKind {
+  try {
+    const raw = localStorage.getItem(PROVIDER_STORAGE)
+    return isProviderKind(raw) ? raw : DEFAULT_PROVIDER
+  } catch {
+    return DEFAULT_PROVIDER
+  }
+}
+
+export function saveProviderKind(kind: ProviderKind) {
+  try {
+    localStorage.setItem(PROVIDER_STORAGE, kind)
+  } catch {
+    // ignora
   }
 }
 

@@ -1,19 +1,21 @@
 import react from '@vitejs/plugin-react'
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
   server: {
     proxy: {
-      // Proxy local para a API da OpenAI: evita CORS no browser e mantém
-      // a chamada saindo do mesmo origin. A API key continua indo no
-      // header Authorization enviado pelo próprio cliente.
-      '/openai-api': {
-        target: 'https://api.openai.com',
+      // Rotas do backend seguro (que guarda a chave da OpenAI no servidor).
+      // O navegador nunca fala direto com a OpenAI nem envia chave nenhuma.
+      '/api': {
+        target: process.env.API_PROXY_TARGET ?? 'http://localhost:8787',
         changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/openai-api/, ''),
       },
     },
+  },
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
   },
 })

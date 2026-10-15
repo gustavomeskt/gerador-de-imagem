@@ -586,3 +586,53 @@ body {
   padding: 9px;
   font-size: 13px;
 }
+
+.ifs-settings-panel__providers {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 16px;
+}
+.ifs-settings-panel__providers legend {
+  font-size: 11px;
+  color: var(--text-dim);
+  padding: 0 4px;
+}
+.ifs-settings-panel label.ifs-settings-panel__provider {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.ifs-settings-panel label.ifs-settings-panel__provider:last-child {
+  margin-bottom: 0;
+}
+.ifs-settings-panel__provider input {
+  margin-top: 2px;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.ifs-settings-panel__provider span {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ifs-settings-panel__provider strong {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
+}
+.ifs-settings-panel__provider small {
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ifs-settings-panel__warning {
+  border: 1px solid var(--danger);
+  border-radius: 8px;
+  padding: 12px;
+}
+.ifs-settings-panel__warning p {
+  color: var(--text);
+  margin-bottom: 12px;
+}

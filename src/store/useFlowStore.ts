@@ -9,15 +9,25 @@ import {
   type NodeChange,
 } from '@xyflow/react'
 import { create } from 'zustand'
-import { cropBase64ToAspect } from '../lib/image'
-import { enhancePromptText, generateImages, MODEL_SIZES, type ImageModel } from '../lib/openai'
 import {
-  loadApiKey,
+  clampCount,
+  DEFAULT_MODEL,
+  getSizeOption,
+  isImageModel,
+  MODEL_SIZES,
+  type ImageModel,
+} from '../generation/models'
+import { getProvider } from '../generation/providers'
+import { resolveAspect, runGeneration, type ImageGenerationConfig, type ImageResult } from '../generation/service'
+import type { ProviderKind } from '../generation/types'
+import { cropToAspect } from '../lib/image'
+import {
   loadFlowsRaw,
   loadImagePreset,
-  saveApiKey,
+  loadProviderKind,
   saveFlowsRaw,
   saveImagePreset,
+  saveProviderKind,
 } from '../lib/storage'
 
 export interface PromptNodeData {
@@ -30,7 +40,8 @@ export interface PromptNodeData {
 export interface ImageSlot {
   id: string
   status: 'loading' | 'done' | 'error'
-  b64?: string
+  src?: string // data URL da imagem
+  mimeType?: string
   aspect: number
   error?: string
 }
@@ -73,13 +84,13 @@ function nextId(prefix: string) {
 
 function defaultImageData(): ImageNodeData {
   const preset = loadImagePreset()
-  const model = (preset?.model as ImageModel) ?? 'gpt-image-1.5'
-  const size = preset?.size ?? MODEL_SIZES[model][0].value
+  const model = isImageModel(preset?.model) ? preset.model : DEFAULT_MODEL
+  const size = preset?.size && getSizeOption(model, preset.size) ? preset.size : MODEL_SIZES[model][0].value
   return {
     model,
     size,
     quality: preset?.quality,
-    count: preset?.count ?? 1,
+    count: clampCount(preset?.count ?? 1),
     images: [],
   }
 }
@@ -88,8 +99,8 @@ function toMeta(flow: StoredFlow): FlowMeta {
   return { id: flow.id, name: flow.name, updatedAt: flow.updatedAt }
 }
 
-// Imagens geradas (base64) nunca são salvas no fluxo — só a estrutura
-// (nós, posições, prompts e configuração) — pra não estourar o localStorage.
+// Imagens geradas nunca são salvas no fluxo — só a estrutura (nós, posições,
+// prompts e configuração) — pra não estourar o localStorage.
 function stripImages(nodes: FlowNode[]): FlowNode[] {
   return nodes.map((n) =>
     n.type === 'image' ? { ...n, data: { ...n.data, images: [], notice: undefined } } : n,
@@ -122,7 +133,7 @@ interface FlowState {
   // saia desse fluxo e abra outro.
   flowsData: Record<string, FlowSlice>
   flows: FlowMeta[]
-  apiKey: string
+  providerKind: ProviderKind
 
   onNodesChange: (flowId: string, changes: NodeChange[]) => void
   onEdgesChange: (flowId: string, changes: EdgeChange[]) => void
@@ -136,7 +147,7 @@ interface FlowState {
   updateImageConfig: (flowId: string, id: string, partial: Partial<ImageNodeData>) => void
   enhancePrompt: (flowId: string, id: string) => Promise<void>
 
-  setApiKey: (key: string) => void
+  setProviderKind: (kind: ProviderKind) => void
 
   createFlow: () => string
   renameFlow: (flowId: string, name: string) => void
@@ -151,28 +162,81 @@ function getConnectedPrompt(nodes: FlowNode[], edges: Edge[], imageNodeId: strin
   const edge = edges.find((e) => e.target === imageNodeId && e.targetHandle === 'prompt-in')
   if (!edge) return null
   const sourceNode = nodes.find((n) => n.id === edge.source)
-  if (!sourceNode) return null
-  const prompt = (sourceNode.data as PromptNodeData).prompt
+  if (!sourceNode || sourceNode.type !== 'prompt') return null
+  const prompt = sourceNode.data.prompt
   return prompt && prompt.trim() ? prompt.trim() : null
+}
+
+function summarizeFailures(results: ImageResult[]): string | undefined {
+  const errors = results.flatMap((r) => (r.ok ? [] : [r.error]))
+  if (errors.length === 0) return undefined
+  if (errors.length === results.length) return errors[0]
+  return `${errors.length} de ${results.length} imagens falharam: ${errors[0]}`
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
 }
 
 export const useFlowStore = create<FlowState>((set, get) => {
   const initial = loadInitialState()
 
   function updateFlowSlice(flowId: string, updater: (slice: FlowSlice) => FlowSlice) {
-    set((state) => ({
-      flowsData: {
-        ...state.flowsData,
-        [flowId]: updater(state.flowsData[flowId] ?? { nodes: [], edges: [] }),
-      },
-    }))
+    // fluxo apagado no meio de uma geração: ignora em vez de recriá-lo
+    if (!get().flowsData[flowId]) return
+    set((state) => {
+      const slice = state.flowsData[flowId]
+      if (!slice) return state
+      return { flowsData: { ...state.flowsData, [flowId]: updater(slice) } }
+    })
     markDirty(flowId)
+  }
+
+  function updatePromptNode(flowId: string, id: string, updater: (data: PromptNodeData) => PromptNodeData) {
+    updateFlowSlice(flowId, (slice) => ({
+      ...slice,
+      nodes: slice.nodes.map((n) => (n.id === id && n.type === 'prompt' ? { ...n, data: updater(n.data) } : n)),
+    }))
+  }
+
+  function updateImageNode(flowId: string, id: string, updater: (data: ImageNodeData) => ImageNodeData) {
+    updateFlowSlice(flowId, (slice) => ({
+      ...slice,
+      nodes: slice.nodes.map((n) => (n.id === id && n.type === 'image' ? { ...n, data: updater(n.data) } : n)),
+    }))
+  }
+
+  function updateSlot(flowId: string, imageNodeId: string, slotId: string, updater: (slot: ImageSlot) => ImageSlot) {
+    updateImageNode(flowId, imageNodeId, (data) => ({
+      ...data,
+      images: data.images.map((slot) => (slot.id === slotId ? updater(slot) : slot)),
+    }))
+  }
+
+  // Valida o que é preciso pra gerar (nó existe, prompt conectado) e devolve
+  // a configuração atual do nó. Se faltar algo, mostra o aviso no próprio nó.
+  function prepareGeneration(flowId: string, imageNodeId: string) {
+    const slice = get().flowsData[flowId]
+    const node = slice?.nodes.find((n) => n.id === imageNodeId)
+    if (!slice || !node || node.type !== 'image') return null
+
+    const prompt = getConnectedPrompt(slice.nodes, slice.edges, imageNodeId)
+    if (!prompt) {
+      updateImageNode(flowId, imageNodeId, (data) => ({
+        ...data,
+        notice: 'Conecte um nó de prompt com texto antes de gerar.',
+      }))
+      return null
+    }
+
+    const config: ImageGenerationConfig = { model: node.data.model, size: node.data.size, quality: node.data.quality }
+    return { prompt, config, provider: getProvider(get().providerKind) }
   }
 
   return {
     flowsData: initial.flowsData,
     flows: initial.flows,
-    apiKey: loadApiKey(),
+    providerKind: loadProviderKind(),
 
     onNodesChange: (flowId, changes) => {
       updateFlowSlice(flowId, (slice) => ({
@@ -225,73 +289,28 @@ export const useFlowStore = create<FlowState>((set, get) => {
     },
 
     updatePromptData: (flowId, id, partial) => {
-      updateFlowSlice(flowId, (slice) => ({
-        ...slice,
-        nodes: slice.nodes.map((n) =>
-          n.id === id && n.type === 'prompt' ? { ...n, data: { ...n.data, ...partial } } : n,
-        ),
-      }))
+      updatePromptNode(flowId, id, (data) => ({ ...data, ...partial }))
     },
 
     enhancePrompt: async (flowId, id) => {
-      const slice = get().flowsData[flowId]
-      const node = slice?.nodes.find((n) => n.id === id)
+      const node = get().flowsData[flowId]?.nodes.find((n) => n.id === id)
       if (!node || node.type !== 'prompt') return
       const original = node.data.prompt.trim()
       if (!original) return
 
-      const apiKey = get().apiKey
-      if (!apiKey) {
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === id && n.type === 'prompt'
-              ? { ...n, data: { ...n.data, enhanceError: 'Configure sua API key: volte ao início e abra "Configuração".' } }
-              : n,
-          ),
-        }))
-        return
-      }
-
-      updateFlowSlice(flowId, (s) => ({
-        ...s,
-        nodes: s.nodes.map((n) =>
-          n.id === id && n.type === 'prompt'
-            ? { ...n, data: { ...n.data, enhancing: true, enhanceError: undefined } }
-            : n,
-        ),
-      }))
+      updatePromptNode(flowId, id, (data) => ({ ...data, enhancing: true, enhanceError: undefined }))
 
       try {
-        const enhanced = await enhancePromptText({ apiKey, prompt: original })
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === id && n.type === 'prompt'
-              ? { ...n, data: { ...n.data, prompt: enhanced, enhancing: false } }
-              : n,
-          ),
-        }))
+        const enhanced = await getProvider(get().providerKind).enhancePrompt(original)
+        updatePromptNode(flowId, id, (data) => ({ ...data, prompt: enhanced, enhancing: false }))
       } catch (err) {
-        const message = err instanceof Error ? err.message : 'Falha ao melhorar o prompt'
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === id && n.type === 'prompt'
-              ? { ...n, data: { ...n.data, enhancing: false, enhanceError: message } }
-              : n,
-          ),
-        }))
+        const message = errorMessage(err, 'Falha ao melhorar o prompt')
+        updatePromptNode(flowId, id, (data) => ({ ...data, enhancing: false, enhanceError: message }))
       }
     },
 
     updateImageConfig: (flowId, id, partial) => {
-      updateFlowSlice(flowId, (slice) => ({
-        ...slice,
-        nodes: slice.nodes.map((n) =>
-          n.id === id && n.type === 'image' ? { ...n, data: { ...n.data, ...partial } } : n,
-        ),
-      }))
+      updateImageNode(flowId, id, (data) => ({ ...data, ...partial }))
 
       // guarda preset (modelo/tamanho/qualidade/quantidade) como padrão do próximo nó de imagem
       const node = get().flowsData[flowId]?.nodes.find((n) => n.id === id)
@@ -305,9 +324,9 @@ export const useFlowStore = create<FlowState>((set, get) => {
       }
     },
 
-    setApiKey: (key) => {
-      saveApiKey(key)
-      set({ apiKey: key })
+    setProviderKind: (kind) => {
+      saveProviderKind(kind)
+      set({ providerKind: kind })
     },
 
     createFlow: () => {
@@ -355,197 +374,85 @@ export const useFlowStore = create<FlowState>((set, get) => {
     },
 
     generate: async (flowId, imageNodeId) => {
-      const slice = get().flowsData[flowId]
-      const node = slice?.nodes.find((n) => n.id === imageNodeId)
-      if (!node || node.type !== 'image') return
-      const data = node.data
-      const apiKey = get().apiKey
+      const prepared = prepareGeneration(flowId, imageNodeId)
+      if (!prepared) return
+      const { prompt, config, provider } = prepared
 
-      if (!apiKey) {
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === imageNodeId && n.type === 'image'
-              ? {
-                  ...n,
-                  data: { ...n.data, notice: 'Configure sua API key: volte ao início e abra "Configuração".' },
-                }
-              : n,
-          ),
-        }))
-        return
-      }
+      const node = get().flowsData[flowId].nodes.find((n) => n.id === imageNodeId) as ImageFlowNode
+      const aspect = resolveAspect(config)
+      const slotIds = Array.from({ length: clampCount(node.data.count) }, () => nextId('img'))
 
-      const prompt = getConnectedPrompt(slice.nodes, slice.edges, imageNodeId)
-      if (!prompt) {
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === imageNodeId && n.type === 'image'
-              ? { ...n, data: { ...n.data, notice: 'Conecte um nó de prompt com texto antes de gerar.' } }
-              : n,
-          ),
-        }))
-        return
-      }
-
-      const sizeOption = MODEL_SIZES[data.model].find((s) => s.value === data.size)
-      const aspect = sizeOption?.aspect ?? 1
-      const count = Math.max(1, Math.min(10, data.count))
-
-      const placeholders: ImageSlot[] = Array.from({ length: count }, () => ({
-        id: nextId('img'),
-        status: 'loading',
-        aspect,
+      updateImageNode(flowId, imageNodeId, (data) => ({
+        ...data,
+        notice: undefined,
+        images: slotIds.map((id) => ({ id, status: 'loading', aspect })),
       }))
 
-      updateFlowSlice(flowId, (s) => ({
-        ...s,
-        nodes: s.nodes.map((n) =>
-          n.id === imageNodeId && n.type === 'image'
-            ? { ...n, data: { ...n.data, images: placeholders, notice: undefined } }
-            : n,
-        ),
-      }))
+      const results = await runGeneration({ provider, config, prompt, count: slotIds.length, crop: cropToAspect })
 
-      try {
-        let b64List = await generateImages({
-          apiKey,
-          model: data.model,
-          prompt,
-          size: data.size,
-          quality: data.quality,
-          n: count,
+      // cada resultado vai pro slot pelo ID (não pela posição): se a pessoa
+      // remover uma imagem enquanto as outras carregam, nada fica desalinhado
+      updateImageNode(flowId, imageNodeId, (data) => {
+        const byId = new Map(slotIds.map((id, i) => [id, results[i]]))
+        const images = data.images.map((slot): ImageSlot => {
+          const result = byId.get(slot.id)
+          if (!result) return slot
+          return result.ok
+            ? { ...slot, status: 'done', src: result.image.src, mimeType: result.image.mimeType, error: undefined }
+            : { ...slot, status: 'error', error: result.error }
         })
-
-        // tamanhos 9:16/16:9 vêm de um recorte no centro — a API não gera
-        // esses dois formatos nativamente
-        if (sizeOption?.crop) {
-          b64List = await Promise.all(b64List.map((b64) => cropBase64ToAspect(b64, aspect)))
-        }
-
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) => {
-            if (n.id !== imageNodeId || n.type !== 'image') return n
-            const images = n.data.images.map((slot, i) =>
-              i < b64List.length
-                ? { ...slot, status: 'done' as const, b64: b64List[i] }
-                : { ...slot, status: 'error' as const, error: 'Sem resposta' },
-            )
-            return { ...n, data: { ...n.data, images } }
-          }),
-        }))
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Falha ao gerar imagens'
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) => {
-            if (n.id !== imageNodeId || n.type !== 'image') return n
-            const images = n.data.images.map((slot) => ({
-              ...slot,
-              status: 'error' as const,
-              error: message,
-            }))
-            return { ...n, data: { ...n.data, images, notice: message } }
-          }),
-        }))
-      }
+        return { ...data, images, notice: summarizeFailures(results) }
+      })
     },
 
     regenerateSlot: async (flowId, imageNodeId, slotId) => {
-      const slice = get().flowsData[flowId]
-      const node = slice?.nodes.find((n) => n.id === imageNodeId)
-      if (!node || node.type !== 'image') return
-      const data = node.data
-      const apiKey = get().apiKey
+      const prepared = prepareGeneration(flowId, imageNodeId)
+      if (!prepared) return
+      const { prompt, config, provider } = prepared
 
-      if (!apiKey) {
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === imageNodeId && n.type === 'image'
-              ? {
-                  ...n,
-                  data: { ...n.data, notice: 'Configure sua API key: volte ao início e abra "Configuração".' },
-                }
-              : n,
-          ),
-        }))
-        return
-      }
+      const node = get().flowsData[flowId].nodes.find((n) => n.id === imageNodeId) as ImageFlowNode
+      const previous = node.data.images.find((s) => s.id === slotId)
+      if (!previous) return
 
-      const prompt = getConnectedPrompt(slice.nodes, slice.edges, imageNodeId)
-      if (!prompt) {
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) =>
-            n.id === imageNodeId && n.type === 'image'
-              ? { ...n, data: { ...n.data, notice: 'Conecte um nó de prompt com texto antes de gerar.' } }
-              : n,
-          ),
-        }))
-        return
-      }
-
-      updateFlowSlice(flowId, (s) => ({
-        ...s,
-        nodes: s.nodes.map((n) => {
-          if (n.id !== imageNodeId || n.type !== 'image') return n
-          const images = n.data.images.map((slot) =>
-            slot.id === slotId ? { ...slot, status: 'loading' as const, error: undefined } : slot,
-          )
-          return { ...n, data: { ...n.data, images } }
-        }),
+      // a proporção do slot acompanha a configuração ATUAL do nó — se a
+      // pessoa mudou de 1:1 pra 9:16, a nova imagem não fica espremida
+      updateSlot(flowId, imageNodeId, slotId, (slot) => ({
+        ...slot,
+        status: 'loading',
+        error: undefined,
+        aspect: resolveAspect(config),
       }))
 
-      try {
-        const sizeOption = MODEL_SIZES[data.model].find((s) => s.value === data.size)
-        let [b64] = await generateImages({
-          apiKey,
-          model: data.model,
-          prompt,
-          size: data.size,
-          quality: data.quality,
-          n: 1,
-        })
+      const [result] = await runGeneration({ provider, config, prompt, count: 1, crop: cropToAspect })
 
-        if (sizeOption?.crop) {
-          b64 = await cropBase64ToAspect(b64, sizeOption.aspect)
-        }
+      if (result?.ok) {
+        updateSlot(flowId, imageNodeId, slotId, (slot) => ({
+          ...slot,
+          status: 'done',
+          src: result.image.src,
+          mimeType: result.image.mimeType,
+          error: undefined,
+        }))
+        return
+      }
 
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) => {
-            if (n.id !== imageNodeId || n.type !== 'image') return n
-            const images = n.data.images.map((slot) =>
-              slot.id === slotId ? { ...slot, status: 'done' as const, b64 } : slot,
-            )
-            return { ...n, data: { ...n.data, images } }
-          }),
+      const message = result ? result.error : 'Sem resposta'
+      if (previous.status === 'done' && previous.src) {
+        // falhou ao refazer uma imagem que já existia: mantém a anterior
+        updateSlot(flowId, imageNodeId, slotId, () => previous)
+        updateImageNode(flowId, imageNodeId, (data) => ({
+          ...data,
+          notice: `Não foi possível gerar de novo (a imagem anterior foi mantida): ${message}`,
         }))
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Falha ao gerar imagem'
-        updateFlowSlice(flowId, (s) => ({
-          ...s,
-          nodes: s.nodes.map((n) => {
-            if (n.id !== imageNodeId || n.type !== 'image') return n
-            const images = n.data.images.map((slot) =>
-              slot.id === slotId ? { ...slot, status: 'error' as const, error: message } : slot,
-            )
-            return { ...n, data: { ...n.data, images } }
-          }),
-        }))
+      } else {
+        updateSlot(flowId, imageNodeId, slotId, (slot) => ({ ...slot, status: 'error', error: message }))
       }
     },
 
     deleteSlot: (flowId, imageNodeId, slotId) => {
-      updateFlowSlice(flowId, (slice) => ({
-        ...slice,
-        nodes: slice.nodes.map((n) => {
-          if (n.id !== imageNodeId || n.type !== 'image') return n
-          return { ...n, data: { ...n.data, images: n.data.images.filter((s) => s.id !== slotId) } }
-        }),
+      updateImageNode(flowId, imageNodeId, (data) => ({
+        ...data,
+        images: data.images.filter((s) => s.id !== slotId),
       }))
     },
   }
@@ -564,7 +471,9 @@ function markDirty(flowId: string) {
   saveTimer = setTimeout(flushDirtyFlows, 600)
 }
 
-function flushDirtyFlows() {
+export function flushDirtyFlows() {
+  if (saveTimer) clearTimeout(saveTimer)
+  saveTimer = undefined
   const state = useFlowStore.getState()
   const flowsMap = loadFlowsRaw() as Record<string, StoredFlow>
 

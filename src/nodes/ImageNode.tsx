@@ -11,13 +11,22 @@ import {
 } from 'lucide-react'
 import NodeMenu from '../components/NodeMenu'
 import {
+  clampCount,
+  MAX_IMAGES_PER_NODE,
   MODEL_LABELS,
   MODEL_QUALITIES,
   MODEL_SIZES,
   type ImageModel,
-} from '../lib/openai'
+} from '../generation/models'
 import { useFlowId } from '../store/flowIdContext'
-import { useFlowStore, type ImageNodeData } from '../store/useFlowStore'
+import { useFlowStore, type ImageNodeData, type ImageSlot } from '../store/useFlowStore'
+
+const EXTENSIONS: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+}
 
 export default function ImageNode({ id, data, selected }: NodeProps & { data: ImageNodeData }) {
   const flowId = useFlowId()
@@ -41,10 +50,12 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
     })
   }
 
-  function downloadImage(b64: string, index: number) {
+  function downloadImage(slot: ImageSlot, index: number) {
+    if (!slot.src) return
+    const ext = EXTENSIONS[slot.mimeType ?? ''] ?? 'png'
     const link = document.createElement('a')
-    link.href = `data:image/png;base64,${b64}`
-    link.download = `imagem-${id}-${index + 1}.png`
+    link.href = slot.src
+    link.download = `imagem-${id}-${index + 1}.${ext}`
     link.click()
   }
 
@@ -127,13 +138,9 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
           <input
             type="number"
             min={1}
-            max={10}
+            max={MAX_IMAGES_PER_NODE}
             value={data.count}
-            onChange={(e) =>
-              updateImageConfig(flowId, id, {
-                count: Math.max(1, Math.min(10, Number(e.target.value) || 1)),
-              })
-            }
+            onChange={(e) => updateImageConfig(flowId, id, { count: clampCount(Number(e.target.value) || 1) })}
           />
         </label>
 
@@ -166,9 +173,7 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
                 </div>
               )}
 
-              {slot.status === 'done' && slot.b64 && (
-                <img src={`data:image/png;base64,${slot.b64}`} alt={`Gerada ${index + 1}`} />
-              )}
+              {slot.status === 'done' && slot.src && <img src={slot.src} alt={`Gerada ${index + 1}`} />}
 
               <div className="ifs-image__overlay">
                 <button
@@ -179,8 +184,8 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
                 >
                   <RefreshCw size={13} />
                 </button>
-                {slot.status === 'done' && slot.b64 && (
-                  <button type="button" title="Baixar" onClick={() => downloadImage(slot.b64!, index)}>
+                {slot.status === 'done' && slot.src && (
+                  <button type="button" title="Baixar" onClick={() => downloadImage(slot, index)}>
                     <Download size={13} />
                   </button>
                 )}

@@ -14,10 +14,36 @@ npm run dev
 
 Abra `http://localhost:5173` (ou a porta que o Vite mostrar).
 
-> Importante: rode sempre via `npm run dev`. O `vite.config.ts` tem um proxy
-> (`/openai-api` → `api.openai.com`) que evita bloqueio de CORS no navegador.
-> Isso só funciona com o servidor de dev rodando — não existe num build
-> estático (`npm run build` + arquivos soltos).
+Por padrão o app usa o **provedor simulado**: gera imagens de teste
+localmente, sem rede e sem custo. Pra testar o caminho de erro, inclua
+`[simular-erro]` no prompt.
+
+### Testes e verificação
+
+```bash
+npm test          # testes automatizados (Vitest)
+npm run lint      # oxlint
+npm run build     # typecheck + build de produção
+npm run check     # os três acima, em sequência
+```
+
+## Arquitetura de geração
+
+O app nunca fala direto com a OpenAI e **nenhuma chave de API fica no
+navegador**. A interface conversa só com um *provedor* (`src/generation/`):
+
+- `models.ts` — catálogo de modelos, tamanhos, qualidades e limites.
+- `types.ts` — contrato `ImageProvider` que todo provedor implementa.
+- `mockProvider.ts` — provedor simulado (grátis, local).
+- `backendProvider.ts` — provedor real: chama `/api/*` do backend seguro, que
+  guarda a chave no servidor. O `vite.config.ts` repassa `/api` para
+  `http://localhost:8787` (ou `API_PROXY_TARGET`). **O backend ainda não foi
+  implementado** — até lá, use o provedor simulado.
+- `openaiRequest.ts` — regras de montagem dos pedidos à OpenAI, pra uso do
+  backend (lógica pura, sem chamadas nem chave).
+- `service.ts` — orquestra uma geração: divide em chamadas pelo limite do
+  modelo, recorta 9:16/16:9 e devolve um resultado por imagem (uma falha não
+  derruba as outras).
 
 ## Telas
 
@@ -25,8 +51,9 @@ Abra `http://localhost:5173` (ou a porta que o Vite mostrar).
 - **Fluxos**: lista os fluxos salvos como cards. Clique num card pra abrir,
   no ícone de lixeira pra apagar, ou em **+ Novo fluxo** pra criar um e já
   entrar nele.
-- **Configuração**: cole sua API key da OpenAI (`sk-...`). Fica salva só no
-  `localStorage` do navegador.
+- **Configuração**: escolha o provedor de geração (simulado ou backend
+  seguro). Se uma API key de versão anterior ainda estiver salva no
+  navegador, aparece um botão pra apagá-la.
 
 **Tela do fluxo** — canvas do React Flow com:
 - Botão de voltar (seta) + nome do fluxo no canto superior esquerdo. Clique
@@ -35,7 +62,8 @@ Abra `http://localhost:5173` (ou a porta que o Vite mostrar).
 
 ## Uso
 
-1. Na tela inicial, aba **Configuração**, cole sua API key e salve.
+1. Na tela inicial, aba **Configuração**, confira o provedor (simulado por
+   padrão).
 2. Volte pra aba **Fluxos** e crie (ou abra) um fluxo.
 3. No dock lateral, clique **Prompt** pra criar um nó de texto e escreva a
    descrição da imagem.
@@ -44,7 +72,8 @@ Abra `http://localhost:5173` (ou a porta que o Vite mostrar).
    esquerda do nó de Imagem.
 6. Clique em **Gerar**. As imagens aparecem lado a lado dentro do nó.
 7. Passe o mouse sobre uma imagem para ver os ícones: **gerar de novo**
-   (regenera só aquela imagem), **baixar** e **remover**.
+   (regenera só aquela imagem — se falhar, a anterior é mantida), **baixar**
+   e **remover**.
 8. Pra trocar o prompt de um nó de Imagem, selecione a conexão (linha) e
    aperte Delete/Backspace, depois puxe uma nova de outro nó de Prompt.
 
@@ -58,7 +87,5 @@ você edita — sem botão de salvar.
 - **Imagens geradas não são salvas no fluxo** — só a estrutura (nós, prompts,
   config, conexões). Isso evita estourar o limite do `localStorage`. Ao reabrir
   um fluxo as imagens precisam ser geradas de novo.
-- A API key fica em texto no `localStorage` e é usada direto do navegador
-  (via proxy local, sem passar por nenhum backend seu). Isso é prático para uso
-  pessoal, mas não é recomendado pra uma versão que outras pessoas vão acessar —
-  nesse caso a key deveria ficar só no servidor.
+- A chave da OpenAI fica só no backend (variável de ambiente do servidor),
+  nunca no navegador nem no `localStorage`.
