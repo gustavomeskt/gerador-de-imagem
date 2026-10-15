@@ -10,7 +10,7 @@ import { create } from 'zustand'
 import { clampCount, DEFAULT_MODEL, getSizeOption, isImageModel, MODEL_SIZES } from '../generation/models'
 import { getProvider } from '../generation/providers'
 import { resolveAspect, runGeneration, type ImageGenerationConfig, type ImageResult } from '../generation/service'
-import type { GeneratedImage, ProviderKind } from '../generation/types'
+import type { CostQuote, GeneratedImage, ImageJob, ImageProvider, ProviderKind } from '../generation/types'
 import { dataUrlToBytes, readImageSize, toArrayBuffer } from '../lib/binary'
 import { cropToAspect } from '../lib/image'
 import { loadFlowsRaw, loadImagePreset, loadProviderKind, saveImagePreset, saveProviderKind } from '../lib/storage'
@@ -69,10 +69,20 @@ export interface StorageIssue {
   message: string
 }
 
+// Pedido de confirmação de custo aberto na tela (provedores pagos).
+export interface CostConfirmationRequest {
+  title: string
+  quote: CostQuote
+}
+
+export const GENERATION_CANCELLED_MESSAGE = 'Geração cancelada: nenhuma chamada paga foi feita.'
+export const AWAITING_CONFIRMATION_MESSAGE = 'Aguardando sua confirmação do custo…'
+
 interface FlowState {
   hydrated: boolean
   persistence: PersistenceMode
   storageIssue: StorageIssue | null
+  costConfirmation: CostConfirmationRequest | null
 
   // nós/arestas de TODOS os fluxos, mantidos em memória ao mesmo tempo —
   // assim uma geração de imagem em andamento continua mesmo que a pessoa
@@ -83,6 +93,7 @@ interface FlowState {
 
   hydrate: () => Promise<void>
   dismissStorageIssue: () => void
+  resolveCostConfirmation: (confirmed: boolean) => void
 
   onNodesChange: (flowId: string, changes: NodeChange[]) => void
   onEdgesChange: (flowId: string, changes: EdgeChange[]) => void
@@ -145,11 +156,46 @@ interface GenerationContext {
 }
 
 let hydrating: Promise<void> | null = null
+let pendingConfirmation: ((confirmed: boolean) => void) | null = null
 
 export const useFlowStore = create<FlowState>((set, get) => {
   function reportStorageIssue(err: unknown) {
     const error = toStorageError(err)
     set({ storageIssue: { kind: error.kind, message: error.message } })
+  }
+
+  // Abre o diálogo de confirmação e espera a resposta da pessoa.
+  function requestCostConfirmation(title: string, quote: CostQuote): Promise<boolean> {
+    pendingConfirmation?.(false) // um pedido novo cancela o anterior
+    return new Promise((resolve) => {
+      pendingConfirmation = resolve
+      set({ costConfirmation: { title, quote } })
+    })
+  }
+
+  // Provedor pago: pede o orçamento e a confirmação antes de gastar.
+  // Devolve o quoteId confirmado ou null (cancelado ou erro). Os avisos
+  // (aguardando, cancelado, erro) vão pra onNotice.
+  async function confirmImageJob(
+    provider: ImageProvider,
+    job: ImageJob,
+    title: string,
+    onNotice: (message: string) => void,
+  ): Promise<string | null> {
+    if (!provider.quoteImages) return null
+    let quote: CostQuote
+    try {
+      quote = await provider.quoteImages(job)
+    } catch (err) {
+      onNotice(errorMessage(err, 'Não foi possível calcular o custo.'))
+      return null
+    }
+    onNotice(AWAITING_CONFIRMATION_MESSAGE)
+    if (!(await requestCostConfirmation(title, quote))) {
+      onNotice(GENERATION_CANCELLED_MESSAGE)
+      return null
+    }
+    return quote.quoteId
   }
 
   function isPersistent() {
@@ -350,6 +396,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
     hydrated: false,
     persistence: 'pending',
     storageIssue: null,
+    costConfirmation: null,
     flowsData: {},
     flows: [],
     providerKind: loadProviderKind(),
@@ -360,6 +407,13 @@ export const useFlowStore = create<FlowState>((set, get) => {
     },
 
     dismissStorageIssue: () => set({ storageIssue: null }),
+
+    resolveCostConfirmation: (confirmed) => {
+      const resolve = pendingConfirmation
+      pendingConfirmation = null
+      set({ costConfirmation: null })
+      resolve?.(confirmed)
+    },
 
     onNodesChange: (flowId, changes) => {
       // nós apagados pela tecla Delete/Backspace também levam seus arquivos
@@ -433,9 +487,19 @@ export const useFlowStore = create<FlowState>((set, get) => {
       if (!original) return
 
       updatePromptNode(flowId, id, (data) => ({ ...data, enhancing: true, enhanceError: undefined }))
+      const provider = getProvider(get().providerKind)
 
       try {
-        const enhanced = await getProvider(get().providerKind).enhancePrompt(original)
+        let quoteId: string | undefined
+        if (provider.quoteEnhance) {
+          const quote = await provider.quoteEnhance(original)
+          if (!(await requestCostConfirmation('Melhorar prompt', quote))) {
+            updatePromptNode(flowId, id, (data) => ({ ...data, enhancing: false, enhanceError: GENERATION_CANCELLED_MESSAGE }))
+            return
+          }
+          quoteId = quote.quoteId
+        }
+        const enhanced = await provider.enhancePrompt(original, quoteId ? { quoteId } : undefined)
         updatePromptNode(flowId, id, (data) => ({ ...data, prompt: enhanced, enhancing: false }))
       } catch (err) {
         const message = errorMessage(err, 'Falha ao melhorar o prompt')
@@ -510,7 +574,19 @@ export const useFlowStore = create<FlowState>((set, get) => {
 
       const previousSlots = node.data.images
       const aspect = resolveAspect(config)
-      const slotIds = Array.from({ length: clampCount(node.data.count) }, () => nextId('img'))
+      const count = clampCount(node.data.count)
+      const setNotice = (notice: string) => updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice }))
+
+      // provedor pago: orçamento + confirmação ANTES de mexer nas imagens
+      let quoteId: string | undefined
+      if (provider.quoteImages) {
+        setNotice('Calculando o custo estimado…')
+        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: count }, `Gerar ${count} imagem(ns)`, setNotice)
+        if (confirmed === null || !findImageNode(flowId, imageNodeId)) return
+        quoteId = confirmed
+      }
+
+      const slotIds = Array.from({ length: count }, () => nextId('img'))
 
       updateImageNode(flowId, imageNodeId, (data) => ({
         ...data,
@@ -518,7 +594,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
         images: slotIds.map((id) => ({ id, status: 'loading', aspect })),
       }))
 
-      const results = await runGeneration({ provider, config, prompt, count: slotIds.length, crop: cropToAspect })
+      const results = await runGeneration({ provider, config, prompt, count: slotIds.length, crop: cropToAspect, quoteId })
       const saved = await Promise.all(
         results.map((r, i) =>
           r.ok ? saveGeneratedImage(flowId, imageNodeId, slotIds[i], r.image, ctx) : Promise.resolve(null),
@@ -578,6 +654,16 @@ export const useFlowStore = create<FlowState>((set, get) => {
       const previous = node.data.images.find((s) => s.id === slotId)
       if (!previous) return
 
+      let quoteId: string | undefined
+      if (provider.quoteImages) {
+        const confirmed = await confirmImageJob(provider, { ...config, prompt, totalImages: 1 }, 'Gerar de novo 1 imagem', (notice) =>
+          updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice })),
+        )
+        if (confirmed === null || !findImageNode(flowId, imageNodeId)?.data.images.some((s) => s.id === slotId)) return
+        quoteId = confirmed
+        updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: undefined }))
+      }
+
       // a proporção do slot acompanha a configuração ATUAL do nó — se a
       // pessoa mudou de 1:1 pra 9:16, a nova imagem não fica espremida
       updateSlot(flowId, imageNodeId, slotId, (slot) => ({
@@ -587,7 +673,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
         aspect: resolveAspect(config),
       }))
 
-      const [result] = await runGeneration({ provider, config, prompt, count: 1, crop: cropToAspect })
+      const [result] = await runGeneration({ provider, config, prompt, count: 1, crop: cropToAspect, quoteId })
 
       if (result?.ok) {
         const saved = await saveGeneratedImage(flowId, imageNodeId, slotId, result.image, ctx)

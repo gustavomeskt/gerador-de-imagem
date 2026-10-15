@@ -74,6 +74,16 @@ export const MODEL_MAX_N: Record<ImageModel, number> = {
   'dall-e-3': 1,
 }
 
+// Tamanho máximo do prompt aceito por cada modelo (caracteres), conforme a
+// documentação da API. O backend recusa prompts maiores antes de chamar a API.
+export const MODEL_PROMPT_LIMITS: Record<ImageModel, number> = {
+  'gpt-image-1.5': 32000,
+  'gpt-image-1': 32000,
+  'gpt-image-1-mini': 32000,
+  'dall-e-3': 4000,
+  'dall-e-2': 1000,
+}
+
 // Limite de imagens por nó (o campo "Qtd." da interface).
 export const MAX_IMAGES_PER_NODE = 10
 

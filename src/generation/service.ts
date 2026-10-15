@@ -22,6 +22,8 @@ export interface RunGenerationParams {
   prompt: string
   count: number
   crop: CropFn
+  // orçamento confirmado pela pessoa (provedores pagos)
+  quoteId?: string
 }
 
 function errorMessage(err: unknown, fallback: string): string {
@@ -34,13 +36,16 @@ export function resolveAspect(config: ImageGenerationConfig): number {
 }
 
 export async function runGeneration(params: RunGenerationParams): Promise<ImageResult[]> {
-  const { provider, config, prompt, count, crop } = params
+  const { provider, config, prompt, count, crop, quoteId } = params
   const sizeOption = getSizeOption(config.model, config.size)
   const batches = splitIntoBatches(count, MODEL_MAX_N[config.model])
 
   const settled = await Promise.allSettled(
     batches.map((n) =>
-      provider.generateImages({ model: config.model, prompt, size: config.size, quality: config.quality, n }),
+      provider.generateImages(
+        { model: config.model, prompt, size: config.size, quality: config.quality, n },
+        quoteId ? { quoteId } : undefined,
+      ),
     ),
   )
 

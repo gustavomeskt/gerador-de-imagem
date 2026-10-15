@@ -21,11 +21,44 @@ export interface GeneratedImage {
   mimeType: string
 }
 
+// Um "trabalho" de geração: tudo o que um nó vai pedir de uma vez (pode virar
+// várias chamadas, ex.: dall-e-3 gera 1 por chamada). É o que se orça e
+// confirma antes de gastar.
+export interface ImageJob {
+  model: ImageModel
+  prompt: string
+  size: string
+  quality?: string
+  totalImages: number
+}
+
+// Orçamento devolvido pelo backend. O id (quoteId) precisa acompanhar as
+// chamadas pagas: sem ele o servidor recusa — é a confirmação explícita.
+export interface CostQuote {
+  quoteId: string
+  kind: 'images' | 'enhance'
+  expiresAt: string // ISO
+  mode: 'simulated' | 'openai' // simulated = servidor não chama a OpenAI, nada é cobrado
+  paid: boolean
+  estimatedUsd: number
+  images: number
+  breakdown: string[] // linhas legíveis explicando a conta
+  notes: string[]
+}
+
+export interface CallOptions {
+  quoteId?: string
+}
+
 export interface ImageProvider {
   readonly kind: ProviderKind
   readonly label: string
-  generateImages(request: ImageGenerationRequest): Promise<GeneratedImage[]>
-  enhancePrompt(prompt: string): Promise<string>
+  generateImages(request: ImageGenerationRequest, options?: CallOptions): Promise<GeneratedImage[]>
+  enhancePrompt(prompt: string, options?: CallOptions): Promise<string>
+  // Provedores que podem gerar custo pedem um orçamento antes; quem não
+  // implementa (o simulado do navegador) é grátis e não pede confirmação.
+  quoteImages?(job: ImageJob): Promise<CostQuote>
+  quoteEnhance?(prompt: string): Promise<CostQuote>
 }
 
 export class ProviderError extends Error {

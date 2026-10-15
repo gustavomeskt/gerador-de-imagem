@@ -745,3 +745,123 @@ body {
   border-left: 2px solid var(--accent);
   padding-left: 10px;
 }
+
+/* Etapa 2: confirmação de custo e status do backend */
+.ifs-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.ifs-dialog {
+  width: min(460px, 100%);
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 12px;
+  padding: 20px;
+  color: var(--text);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.ifs-dialog h2 {
+  font-size: 16px;
+  margin: 10px 0 14px;
+}
+.ifs-dialog__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(62, 207, 142, 0.12);
+  color: var(--success);
+}
+.ifs-dialog__badge--paid {
+  background: rgba(229, 72, 77, 0.14);
+  color: var(--danger);
+}
+.ifs-dialog__cost {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  background: var(--panel-raised);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+}
+.ifs-dialog__cost span {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.ifs-dialog__cost strong {
+  font-size: 22px;
+}
+.ifs-dialog__breakdown,
+.ifs-dialog__notes {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.ifs-dialog__notes {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.ifs-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.ifs-dialog__cancel {
+  background: transparent;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 8px 14px;
+  cursor: pointer;
+}
+.ifs-backend-status {
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+  padding: 12px;
+  margin: 0 0 16px;
+  font-size: 12px;
+}
+.ifs-backend-status__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.ifs-backend-status__head button {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.ifs-backend-status dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  margin: 0;
+}
+.ifs-backend-status dt {
+  color: var(--text-dim);
+}
+.ifs-backend-status dd {
+  margin: 0;
+}
+.ifs-settings-panel p.ifs-backend-status__error {
+  color: var(--danger);
+  margin: 0;
+}
+.ifs-backend-status__paid {
+  color: var(--danger);
+  font-weight: 600;
+}

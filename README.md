@@ -5,27 +5,157 @@ com a API da OpenAI: um nó de **Prompt** que você arrasta, conecta num nó de
 **Imagem** (modelo, proporção, qualidade e quantidade) e ele gera N imagens
 lado a lado.
 
-## Como rodar
+## Como rodar (resumo)
 
 ```bash
 npm install
-npm run dev
+npm run dev:full     # frontend (Vite, porta 5173) + backend local (porta 8787)
 ```
 
-Abra `http://localhost:5173` (ou a porta que o Vite mostrar).
+Abra `http://localhost:5173`. Só o frontend: `npm run dev`. Só o backend:
+`npm run server`.
 
-Por padrão o app usa o **provedor simulado**: gera imagens de teste
-localmente, sem rede e sem custo. Pra testar o caminho de erro, inclua
-`[simular-erro]` no prompt.
+Por padrão tudo é **gratuito**: o app usa o provedor simulado do navegador, e
+o backend começa em modo simulado (não chama a OpenAI). Pra testar o caminho
+de erro do provedor do navegador, inclua `[simular-erro]` no prompt.
 
 ### Testes e verificação
 
 ```bash
-npm test          # testes automatizados (Vitest)
+npm test          # testes automatizados (Vitest) — frontend e backend
 npm run lint      # oxlint
-npm run build     # typecheck + build de produção
+npm run build     # typecheck (frontend + servidor) + build de produção
 npm run check     # os três acima, em sequência
 ```
+
+## Passo a passo no Windows
+
+1. **Instale o Node.js 22 LTS** (ou mais novo) em <https://nodejs.org> —
+   pode deixar as opções padrão do instalador. Depois, abra o **PowerShell**
+   e confira:
+
+   ```powershell
+   node -v    # deve mostrar v22.x ou maior
+   npm -v
+   ```
+
+2. **Baixe o projeto** (com Git instalado — <https://git-scm.com>) e entre na
+   pasta:
+
+   ```powershell
+   git clone https://github.com/gustavomeskt/gerador-de-imagem.git
+   cd gerador-de-imagem
+   git checkout claude/determined-darwin-bmslxf
+   ```
+
+3. **Instale as dependências** (uma vez só):
+
+   ```powershell
+   npm install
+   ```
+
+4. **Crie o arquivo de configuração do servidor** a partir do exemplo:
+
+   ```powershell
+   Copy-Item .env.example .env
+   notepad .env
+   ```
+
+   Pra testar sem gastar nada, deixe `IMAGE_BACKEND_MODE=simulated` e
+   `OPENAI_API_KEY=` vazio. O `.env` nunca vai para o repositório.
+
+5. **Inicie frontend e backend juntos:**
+
+   ```powershell
+   npm run dev:full
+   ```
+
+   Aparecem as linhas `[web]` (Vite) e `[api]` (servidor). O servidor informa
+   o modo (SIMULADO ou OPENAI) e os limites. Se o Windows Firewall perguntar,
+   pode **negar** o acesso à rede: o servidor só atende o próprio computador.
+
+6. **Abra** `http://localhost:5173` no navegador. Em **Configuração**, escolha
+   o provedor:
+   - **Simulado (grátis, sem API)** — tudo no navegador;
+   - **OpenAI via backend local (seguro)** — passa pelo servidor. O painel
+     "Servidor local" mostra o modo, se há chave configurada (sim/não), o
+     consumo do dia e os limites.
+
+7. **Para parar:** `Ctrl + C` no PowerShell (confirme com `S` se perguntar).
+
+### Ativar chamadas reais (pagas) — só quando quiser
+
+1. Crie uma chave em <https://platform.openai.com/api-keys> e defina um
+   limite de gastos na sua conta da OpenAI (Billing → Limits).
+2. No `.env`: `IMAGE_BACKEND_MODE=openai` e `OPENAI_API_KEY=sk-...` (sem
+   aspas). Revise `MAX_COST_PER_JOB_USD`, `DAILY_BUDGET_USD` e
+   `DAILY_IMAGE_LIMIT`.
+3. Reinicie (`Ctrl + C` e `npm run dev:full`). O servidor deve dizer
+   `Modo: OPENAI`.
+4. Toda geração (e todo "Melhorar prompt") abre uma janela com o **custo
+   estimado**; nada é enviado à OpenAI antes de você clicar em confirmar.
+
+### Problemas comuns no Windows
+
+- **"A porta 8787 já está em uso"** — feche o outro terminal com o servidor
+  ou mude `PORT` no `.env` (e rode o Vite com
+  `$env:API_PROXY_TARGET="http://127.0.0.1:NOVA_PORTA"; npm run dev`).
+- **"Backend local indisponível" no app** — o servidor não está rodando; use
+  `npm run dev:full` (e não só `npm run dev`).
+- **"Configuração inválida: ..."** ao iniciar — a mensagem diz qual variável
+  do `.env` corrigir.
+- **`npm` não é reconhecido** — reabra o PowerShell depois de instalar o
+  Node.js.
+- **Scripts bloqueados no PowerShell** ("execução de scripts foi
+  desabilitada") — rode uma vez
+  `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, ou use o Prompt de
+  Comando (`cmd`).
+
+## Backend local (pasta `server/`)
+
+Servidor Node.js (sem framework, só `node:http`) que é a **única** parte do
+sistema que conhece a chave da OpenAI. Ele lê a chave do `.env` (variável de
+ambiente) e nunca a devolve em respostas, erros ou logs.
+
+Rotas (todas em `/api`, repassadas pelo Vite em desenvolvimento):
+
+| Rota | O que faz |
+|---|---|
+| `GET /api/health` | servidor no ar |
+| `GET /api/status` | modo, se há chave (sim/não), limites, consumo do dia |
+| `POST /api/images/quote` | orçamento de uma geração (todas as imagens de um nó) |
+| `POST /api/images/generate` | gera imagens — exige o cabeçalho `X-Cost-Quote` |
+| `POST /api/prompts/quote` | orçamento do "Melhorar prompt" |
+| `POST /api/prompts/enhance` | melhora o prompt — exige `X-Cost-Quote` |
+
+Proteções:
+
+- **Só o próprio computador:** recusa iniciar fora de `127.0.0.1`/`::1`/
+  `localhost`; recusa requisições com `Host` de outro domínio (DNS
+  rebinding), com `Origin` fora de `ALLOWED_ORIGINS` ou marcadas como
+  cross-site; exige `application/json` e não responde CORS — outros sites
+  abertos no navegador não conseguem disparar gerações.
+- **Validação estrita:** lista de modelos permitidos (`ALLOWED_MODELS`),
+  tamanhos/qualidades/quantidade válidos por modelo, limite de tamanho do
+  prompt por modelo, campos desconhecidos recusados — nada arbitrário chega à
+  OpenAI. Campos das próximas etapas (`references`, `characters`...) são
+  recusados com mensagem clara.
+- **Confirmação de custo obrigatória:** o servidor só faz uma chamada paga
+  com um orçamento (`quoteId`) que a pessoa confirmou na tela, que bate
+  exatamente com o pedido, não venceu e não foi usado além do confirmado.
+- **Controle de consumo:** custo máximo por geração, orçamento diário em US$,
+  limite diário de imagens (salvos em `server/.data/usage.json`, valem mesmo
+  depois de reiniciar), limite de chamadas por minuto, limite de chamadas
+  simultâneas com fila curta, timeout das chamadas à OpenAI e limite de
+  tamanho das requisições.
+- **Erros tratados:** chave recusada, pedido recusado, limite da OpenAI,
+  timeout e falha de rede viram mensagens claras; mensagens vindas da OpenAI
+  passam por uma limpeza que remove qualquer trecho de chave.
+
+A estimativa de custo usa uma tabela de preços de referência
+(`server/pricing.ts`) — a cobrança real é a da fatura da OpenAI. Os preços
+podem ser corrigidos sem mexer no código com `PRICE_TABLE_FILE`. Todas as
+variáveis estão explicadas no `.env.example`.
 
 ## Arquitetura de geração
 
@@ -35,11 +165,11 @@ navegador**. A interface conversa só com um *provedor* (`src/generation/`):
 - `models.ts` — catálogo de modelos, tamanhos, qualidades e limites.
 - `types.ts` — contrato `ImageProvider` que todo provedor implementa.
 - `mockProvider.ts` — provedor simulado (grátis, local).
-- `backendProvider.ts` — provedor real: chama `/api/*` do backend seguro, que
-  guarda a chave no servidor. O `vite.config.ts` repassa `/api` para
-  `http://localhost:8787` (ou `API_PROXY_TARGET`). **O backend ainda não foi
-  implementado** — até lá, use o provedor simulado.
-- `openaiRequest.ts` — regras de montagem dos pedidos à OpenAI, pra uso do
+- `backendProvider.ts` — provedor real: pede orçamento, e só depois da
+  confirmação chama `/api/*` do backend local, que guarda a chave no
+  servidor. O `vite.config.ts` repassa `/api` para `http://127.0.0.1:8787`
+  (ou `API_PROXY_TARGET`).
+- `openaiRequest.ts` — regras de montagem dos pedidos à OpenAI, usadas pelo
   backend (lógica pura, sem chamadas nem chave).
 - `service.ts` — orquestra uma geração: divide em chamadas pelo limite do
   modelo, recorta 9:16/16:9 e devolve um resultado por imagem (uma falha não

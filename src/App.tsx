@@ -4,6 +4,7 @@ import { useEffect, useMemo } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import FlowHeader from './components/FlowHeader'
 import Home from './components/Home'
+import CostConfirmDialog from './components/CostConfirmDialog'
 import NodeDock from './components/NodeDock'
 import StorageBanner from './components/StorageBanner'
 import ImageNode from './nodes/ImageNode'
@@ -87,6 +88,7 @@ export default function App() {
     <BrowserRouter>
       <div className="ifs-app">
         <StorageBanner />
+        <CostConfirmDialog />
         <Routes>
           <Route path="/" element={<HomeRoute />} />
           <Route path="/flow/:id" element={<FlowRoute />} />

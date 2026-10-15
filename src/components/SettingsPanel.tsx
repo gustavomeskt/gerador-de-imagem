@@ -4,13 +4,14 @@ import { getProvider, PROVIDER_KINDS } from '../generation/providers'
 import type { ProviderKind } from '../generation/types'
 import { hasLegacyApiKey, removeLegacyApiKey } from '../lib/storage'
 import { useFlowStore } from '../store/useFlowStore'
+import BackendStatusPanel from './BackendStatusPanel'
 import StorageSettings from './StorageSettings'
 
 const PROVIDER_HELP: Record<ProviderKind, string> = {
   mock: `Gera imagens de teste localmente, sem rede e sem custo. Pra testar o caminho de erro, inclua ${SIMULATE_ERROR_TOKEN} no prompt.`,
   backend:
-    'Usa a OpenAI através do backend seguro: a chave da API fica só no servidor, nunca no navegador. ' +
-    'Precisa do servidor da API rodando (ele será implementado numa próxima etapa).',
+    'Usa o servidor local (npm run server): a chave da OpenAI fica só no servidor, nunca no navegador. ' +
+    'Toda chamada mostra o custo estimado e só acontece depois da sua confirmação.',
 }
 
 export default function SettingsPanel() {
@@ -49,6 +50,8 @@ export default function SettingsPanel() {
           </label>
         ))}
       </fieldset>
+
+      {providerKind === 'backend' && <BackendStatusPanel />}
 
       <StorageSettings />
 

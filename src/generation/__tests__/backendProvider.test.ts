@@ -67,3 +67,55 @@ describe('provedor via backend', () => {
     expect(fetchImpl.mock.calls[0]?.[0]).toBe('/api/prompts/enhance')
   })
 })
+
+describe('orçamento e confirmação', () => {
+  const quote = {
+    quoteId: 'q-1',
+    kind: 'images',
+    expiresAt: '2026-10-15T00:10:00.000Z',
+    mode: 'openai',
+    paid: true,
+    estimatedUsd: 0.5,
+    images: 2,
+    breakdown: ['2 × US$ 0.25'],
+    notes: [],
+  }
+
+  it('pede orçamento do trabalho inteiro em /api/images/quote', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => jsonResponse(200, quote))
+    const provider = createBackendProvider({ fetchImpl })
+    const job = { model: 'gpt-image-1.5' as const, prompt: 'cena', size: '1024x1536', quality: 'high', totalImages: 2 }
+    await expect(provider.quoteImages!(job)).resolves.toEqual(quote)
+    expect(fetchImpl.mock.calls[0][0]).toBe('/api/images/quote')
+    expect(JSON.parse(fetchImpl.mock.calls[0][1]?.body as string)).toEqual(job)
+  })
+
+  it('envia o orçamento confirmado no cabeçalho X-Cost-Quote (e nunca uma chave)', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => jsonResponse(200, { images: [{ b64: 'AAA' }] }))
+    const provider = createBackendProvider({ fetchImpl })
+    await provider.generateImages(request, { quoteId: 'q-1' })
+    const headers = new Headers(fetchImpl.mock.calls[0][1]?.headers)
+    expect(headers.get('X-Cost-Quote')).toBe('q-1')
+    expect(headers.has('Authorization')).toBe(false)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1]?.body as string)).toEqual(request) // corpo = contrato original
+  })
+
+  it('orçamento malformado é recusado', async () => {
+    const provider = createBackendProvider({ fetchImpl: async () => jsonResponse(200, { quoteId: 1 }) })
+    await expect(provider.quoteEnhance!('x')).rejects.toBeInstanceOf(ProviderError)
+  })
+
+  it('mostra a mensagem do servidor quando falta confirmação ou estoura limite', async () => {
+    const provider = createBackendProvider({
+      fetchImpl: async () => jsonResponse(429, { error: { message: 'Limite diário de imagens atingido', code: 'daily_image_limit' } }),
+    })
+    await expect(provider.generateImages(request)).rejects.toThrow('Limite diário de imagens atingido')
+  })
+
+  it('consulta o status do servidor', async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, _init?: RequestInit) => jsonResponse(200, { mode: 'simulated', keyConfigured: false }))
+    const provider = createBackendProvider({ fetchImpl })
+    await expect(provider.fetchStatus()).resolves.toMatchObject({ mode: 'simulated' })
+    expect(fetchImpl.mock.calls[0][1]?.method).toBe('GET')
+  })
+})

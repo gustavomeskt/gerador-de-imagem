@@ -22,3 +22,9 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Segredos e dados locais do backend
+.env
+.env.*
+!.env.example
+server/.data

@@ -12,12 +12,15 @@ export function isProviderKind(value: unknown): value is ProviderKind {
 
 const instances: Partial<Record<ProviderKind, ImageProvider>> = {}
 
+// instância única do provedor do backend, pra telas que precisam do status
+export const backendProvider = createBackendProvider()
+
 function create(kind: ProviderKind): ImageProvider {
   switch (kind) {
     case 'mock':
       return createMockProvider({ latencyMs: 600 })
     case 'backend':
-      return createBackendProvider()
+      return backendProvider
   }
 }
 

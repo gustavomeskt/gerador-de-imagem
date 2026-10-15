@@ -27,9 +27,14 @@ export const PROMPT_ENHANCER_MODEL = 'gpt-5-mini'
 
 export const PROMPT_ENHANCER_SYSTEM = `Você reescreve prompts curtos de geração de imagem em prompts detalhados e fotográficos, no mesmo estilo que o ChatGPT usa internamente antes de gerar uma imagem. Adicione especificações de iluminação, ângulo de câmera, composição, textura de material/pele, humor e estilo fotográfico, mantendo fielmente a ideia original do usuário — não troque o assunto nem invente elementos que mudem o pedido. Responda só com o prompt reescrito, em inglês, sem aspas, sem explicações, sem prefixos como "Prompt:".`
 
+// Teto de tokens de saída do melhorador (inclui raciocínio do modelo). Limita
+// o custo máximo de cada chamada.
+export const PROMPT_ENHANCER_MAX_OUTPUT_TOKENS = 4000
+
 export function buildEnhancerBody(prompt: string): Record<string, unknown> {
   return {
     model: PROMPT_ENHANCER_MODEL,
+    max_completion_tokens: PROMPT_ENHANCER_MAX_OUTPUT_TOKENS,
     messages: [
       { role: 'system', content: PROMPT_ENHANCER_SYSTEM },
       { role: 'user', content: prompt },

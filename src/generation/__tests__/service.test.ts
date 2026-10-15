@@ -28,14 +28,25 @@ describe('runGeneration', () => {
     })
 
     expect(provider.generateImages).toHaveBeenCalledTimes(3)
-    expect(provider.generateImages).toHaveBeenCalledWith({
-      model: 'dall-e-3',
-      prompt: 'p',
-      size: '1024x1024',
-      quality: 'hd',
-      n: 1,
-    })
+    expect(provider.generateImages).toHaveBeenCalledWith(
+      { model: 'dall-e-3', prompt: 'p', size: '1024x1024', quality: 'hd', n: 1 },
+      undefined,
+    )
     expect(results.every((r) => r.ok)).toBe(true)
+  })
+
+  it('repassa o orçamento confirmado (quoteId) em todas as chamadas', async () => {
+    const provider = fakeProvider(async (req) => Array.from({ length: req.n }, () => img('x')))
+    await runGeneration({
+      provider,
+      config: { model: 'dall-e-3', size: '1024x1024' },
+      prompt: 'p',
+      count: 2,
+      crop: identityCrop,
+      quoteId: 'q-123',
+    })
+    expect(provider.generateImages).toHaveBeenCalledTimes(2)
+    for (const call of provider.generateImages.mock.calls) expect(call[1]).toEqual({ quoteId: 'q-123' })
   })
 
   it('uma chamada que falha não derruba as outras', async () => {
