@@ -8,6 +8,7 @@ import {
   type ProjectRecord,
 } from '../persistence/schema'
 import type { ReferenceMimeType } from '../generation/references'
+import { normalizeStyleGuide } from '../generation/styleGuide'
 import type { FlowMeta, FlowNode, FlowSlice, ImageSlot, ReferenceImage } from './types'
 
 // Converte entre o estado da tela e o formato salvo no banco.
@@ -62,6 +63,7 @@ export function serializeProject(meta: FlowMeta, slice: FlowSlice, updatedAt = D
     updatedAt,
     nodes,
     edges: slice.edges.map(({ selected: _selected, ...e }) => e),
+    ...(slice.styleGuide ? { styleGuide: slice.styleGuide } : {}),
   }
 }
 
@@ -177,7 +179,8 @@ export function restoreProject(record: ProjectRecord, assets: AssetRecord[]): Re
       createdAt: record.createdAt ?? record.updatedAt,
       updatedAt: record.updatedAt,
     },
-    slice: { nodes, edges: record.edges ?? [] },
+    // projetos antigos (sem guia) recebem o guia padrão DESLIGADO
+    slice: { nodes, edges: record.edges ?? [], styleGuide: normalizeStyleGuide(record.styleGuide) },
     orphanAssetIds,
     recoveredCount,
   }

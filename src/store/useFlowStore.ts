@@ -8,8 +8,10 @@ import {
 } from '@xyflow/react'
 import { create } from 'zustand'
 import { clampCount, DEFAULT_MODEL, getSizeOption, isImageModel, MODEL_LABELS, MODEL_SIZES, type ImageModel } from '../generation/models'
+import { orderedPhotos, sheetOf, type Character, type CharacterSheet } from '../generation/characters'
+import { composePrompt } from '../generation/promptComposer'
+import { defaultStyleGuide, sizeForAspect, type StyleGuide } from '../generation/styleGuide'
 import {
-  buildReferencePrompt,
   checkReferenceFile,
   DEFAULT_MAX_REFERENCES,
   effectiveFidelity,
@@ -18,6 +20,8 @@ import {
   toDescriptor,
   type InputFidelity,
   type ReferenceImageInput,
+  type ReferenceMimeType,
+  type ReferenceRole,
 } from '../generation/references'
 import { getProvider } from '../generation/providers'
 import { resolveAspect, runGeneration, type ImageGenerationConfig, type ImageResult } from '../generation/service'
@@ -31,6 +35,8 @@ import { legacyFlowToProject, migrateLegacyFlows } from '../persistence/migratio
 import { repository } from '../persistence/repository'
 import type { AssetRecord, AssetSource, ProjectRecord } from '../persistence/schema'
 import { collectAssetIds, restoreProject, serializeProject, type RestoredProject } from './projectSerialization'
+import { useCharacterStore } from './useCharacterStore'
+import { LIBRARY_PROJECT_ID } from '../generation/characters'
 import type {
   FlowMeta,
   FlowNode,
@@ -64,10 +70,15 @@ function nextId(prefix: string) {
   return `${prefix}-${Date.now()}-${idCounter}`
 }
 
-function defaultImageData(): ImageNodeData {
+function defaultImageData(style?: StyleGuide): ImageNodeData {
   const preset = loadImagePreset()
   const model = isImageModel(preset?.model) ? preset.model : DEFAULT_MODEL
-  const size = preset?.size && getSizeOption(model, preset.size) ? preset.size : MODEL_SIZES[model][0].value
+  // com guia de estilo ativo, o nó novo já nasce na proporção preferida (9:16 por padrão)
+  const size = style?.enabled
+    ? sizeForAspect(model, style.aspect)
+    : preset?.size && getSizeOption(model, preset.size)
+      ? preset.size
+      : MODEL_SIZES[model][0].value
   return {
     model,
     size,
@@ -123,6 +134,12 @@ interface FlowState {
   addReferenceImages: (flowId: string, nodeId: string, files: ReferenceFileInput[]) => Promise<void>
   replaceReferenceImage: (flowId: string, nodeId: string, imageId: string, file: ReferenceFileInput) => Promise<void>
   removeReferenceImage: (flowId: string, nodeId: string, imageId: string) => void
+
+  // personagens da biblioteca num nó de imagem e ajustes só da cena
+  setCast: (flowId: string, imageNodeId: string, castIds: string[]) => void
+  setCastNote: (flowId: string, imageNodeId: string, characterId: string, note: string) => void
+  updateStyleGuide: (flowId: string, partial: Partial<StyleGuide>) => void
+  getGenerationPreview: (flowId: string, imageNodeId: string) => GenerationPlan | { error: string }
   deleteNode: (flowId: string, id: string) => void
 
   updatePromptData: (flowId: string, id: string, partial: Partial<PromptNodeData>) => void
@@ -176,6 +193,37 @@ interface GenerationContext {
   config: ImageGenerationConfig
   provider: ProviderKind
   references?: AssetSource['references']
+  inputFidelity?: InputFidelity
+  characters?: AssetSource['characters']
+  styleGuideApplied?: boolean
+}
+
+// Uma foto que vai na geração (de um personagem ou de um nó de referência).
+export interface PlannedImage {
+  kind: 'character' | 'reference'
+  ownerId: string
+  ownerLabel: string
+  role: string
+  photoName: string
+  src?: string
+  assetId?: string
+  sha256: string
+  mimeType: ReferenceMimeType
+  width: number
+  height: number
+  byteLength: number
+}
+
+// Tudo o que uma geração vai usar — mostrado na pré-visualização.
+export interface GenerationPlan {
+  model: ImageModel
+  scene: string
+  prompt: string
+  images: PlannedImage[]
+  omitted: Array<{ ownerLabel: string; photoName: string }>
+  characters: Array<{ id: string; name: string; version: number; sheet: CharacterSheet; sceneNote: string; sent: number; total: number }>
+  references: Array<{ label: string; role: ReferenceRole; count: number }>
+  style: StyleGuide | null
   inputFidelity?: InputFidelity
 }
 
@@ -339,6 +387,8 @@ export const useFlowStore = create<FlowState>((set, get) => {
           quality: ctx.config.quality,
           provider: ctx.provider,
           ...(ctx.references?.length ? { references: ctx.references, inputFidelity: ctx.inputFidelity } : {}),
+          ...(ctx.characters?.length ? { characters: ctx.characters } : {}),
+          ...(ctx.styleGuideApplied ? { styleGuideApplied: true } : {}),
         },
       }
       await repository.putAsset(asset)
@@ -402,10 +452,6 @@ export const useFlowStore = create<FlowState>((set, get) => {
     }))
   }
 
-  function hasReferenceEdges(flowId: string, imageNodeId: string): boolean {
-    return !!get().flowsData[flowId]?.edges.some((e) => e.target === imageNodeId && e.targetHandle === REFERENCE_EDGE_HANDLE)
-  }
-
   // Lê, valida e salva uma foto de referência. A mesma foto (mesmo hash) já
   // usada em outro nó do projeto reaproveita o arquivo salvo — sem cópia.
   async function ingestReferenceFile(
@@ -460,81 +506,157 @@ export const useFlowStore = create<FlowState>((set, get) => {
     }
   }
 
-  async function readReferenceBytes(img: ReferenceImage): Promise<Uint8Array> {
-    if (img.src?.startsWith('data:')) return dataUrlToBytes(img.src).bytes
-    if (img.assetId && isPersistent()) {
-      const asset = await repository.getAsset(img.assetId)
-      if (asset) return new Uint8Array(asset.bytes)
-    }
-    throw new Error(`a foto "${img.name}" não foi encontrada no armazenamento — substitua ou remova`)
-  }
-
-  // Junta as referências conectadas ao nó de imagem: confere compatibilidade
-  // e limites, carrega os BYTES de cada foto e monta o texto que diz ao modelo
-  // qual imagem é de quem. Avisos de problema vão pro próprio nó.
-  async function loadReferences(
-    flowId: string,
-    imageNodeId: string,
-    model: ImageModel,
-    wantedFidelity: InputFidelity | undefined,
-    scene: string,
-  ): Promise<PreparedReferences | null> {
-    const notice = (message: string) => updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: message }))
+  // Planeja as fotos e as instruções de uma geração (sem ler bytes ainda):
+  // personagens da biblioteca escolhidos no nó + referências conectadas +
+  // guia de estilo do projeto. Usado tanto pra gerar quanto pra mostrar a
+  // pré-visualização — o que aparece na tela é exatamente o que vai.
+  function planGenerationInputs(flowId: string, imageNodeId: string, scene: string): GenerationPlan | { error: string } {
     const slice = get().flowsData[flowId]
-    if (!slice) return null
-    const nodes = connectedReferenceNodes(slice, imageNodeId)
-    if (nodes.length === 0) return { prompt: scene, inputs: [], sourceRefs: [] }
+    const node = findImageNode(flowId, imageNodeId)
+    if (!slice || !node) return { error: 'Nó não encontrado.' }
+    const model = node.data.model
+    const style = slice.styleGuide?.enabled ? slice.styleGuide : null
 
-    if (!supportsReferences(model)) {
-      notice(
-        `${MODEL_LABELS[model]} não aceita imagens de referência. Escolha GPT Image 1.5, GPT Image 1 ou GPT Image 1 Mini, ou desconecte as referências.`,
-      )
-      return null
-    }
-    const empty = nodes.find((n) => n.data.images.length === 0)
-    if (empty) {
-      notice(`O nó de referência "${empty.data.label || 'sem nome'}" está sem fotos.`)
-      return null
-    }
-    const total = nodes.reduce((sum, n) => sum + n.data.images.length, 0)
-    if (total > DEFAULT_MAX_REFERENCES) {
-      notice(`São ${total} fotos de referência conectadas; o limite é ${DEFAULT_MAX_REFERENCES} por geração.`)
-      return null
+    // personagens (ids estáveis da biblioteca)
+    const library = useCharacterStore.getState().characters
+    const castIds = node.data.castIds ?? []
+    const cast: Character[] = []
+    for (const id of castIds) {
+      const character = library.find((c) => c.id === id)
+      if (!character) {
+        return { error: 'Um personagem desta cena foi excluído da biblioteca. Remova-o do nó (ou restaure o backup) para continuar.' }
+      }
+      if (!character.photos.some((p) => !p.missing)) {
+        return { error: `As fotos de "${character.name}" não foram encontradas no armazenamento. Edite o personagem.` }
+      }
+      cast.push(character)
     }
 
-    const inputs: ReferenceImageInput[] = []
-    const sourceRefs: NonNullable<AssetSource['references']> = []
-    try {
-      for (const node of nodes) {
-        for (const img of node.data.images) {
-          const bytes = await readReferenceBytes(img)
-          inputs.push({
-            sha256: img.sha256,
-            mimeType: img.mimeType,
-            byteLength: bytes.byteLength,
-            width: img.width,
-            height: img.height,
-            b64: bytesToBase64(bytes),
-          })
-          sourceRefs.push({ assetId: img.assetId, sha256: img.sha256, label: node.data.label, role: node.data.role })
+    const refNodes = connectedReferenceNodes(slice, imageNodeId)
+    const empty = refNodes.find((n) => n.data.images.length === 0)
+    if (empty) return { error: `O nó de referência "${empty.data.label || 'sem nome'}" está sem fotos.` }
+    const missingRef = refNodes.flatMap((n) => n.data.images).find((img) => img.missing)
+    if (missingRef) return { error: `Referência indisponível: a foto "${missingRef.name}" não foi encontrada — substitua ou remova.` }
+
+    const refPhotos = refNodes.reduce((sum, n) => sum + n.data.images.length, 0)
+    const hasImages = cast.length > 0 || refPhotos > 0
+    if (hasImages && !supportsReferences(model)) {
+      return {
+        error: `${MODEL_LABELS[model]} não aceita imagens de referência. Escolha GPT Image 1.5, GPT Image 1 ou GPT Image 1 Mini, ou retire personagens e referências.`,
+      }
+    }
+
+    // limite de fotos: a principal de cada personagem e todas as das
+    // referências são obrigatórias; o que sobrar vai pras fotos extras dos
+    // personagens, uma de cada vez (rodízio)
+    const required = cast.length + refPhotos
+    if (required > DEFAULT_MAX_REFERENCES) {
+      return {
+        error: `Esta cena precisa de ${required} fotos (1 por personagem + referências), acima do limite de ${DEFAULT_MAX_REFERENCES} por geração.`,
+      }
+    }
+    const castPhotos = cast.map((c) => orderedPhotos(c).filter((p) => !p.missing))
+    const chosen = castPhotos.map((photos) => photos.slice(0, 1))
+    let budget = DEFAULT_MAX_REFERENCES - required
+    for (let round = 1; budget > 0; round++) {
+      let added = false
+      for (let i = 0; i < castPhotos.length && budget > 0; i++) {
+        if (castPhotos[i][round]) {
+          chosen[i].push(castPhotos[i][round])
+          budget -= 1
+          added = true
         }
       }
-    } catch (err) {
-      notice(`Referência indisponível: ${errorMessage(err, 'erro ao ler a foto')}.`)
-      return null
+      if (!added) break
     }
 
-    const groups = nodes.map((n) => ({
-      label: n.data.label,
-      role: n.data.role,
-      preserveClothing: n.data.preserveClothing,
-      imageCount: n.data.images.length,
-    }))
+    const notes = node.data.castNotes ?? {}
+    const images: PlannedImage[] = []
+    const omitted: GenerationPlan['omitted'] = []
+    cast.forEach((c, i) => {
+      for (const p of chosen[i]) {
+        images.push({ kind: 'character', ownerId: c.id, ownerLabel: c.name, role: 'character', photoName: p.name, src: p.src, assetId: p.assetId, sha256: p.sha256, mimeType: p.mimeType, width: p.width, height: p.height, byteLength: p.byteLength })
+      }
+      for (const p of castPhotos[i].slice(chosen[i].length)) omitted.push({ ownerLabel: c.name, photoName: p.name })
+    })
+    for (const n of refNodes) {
+      for (const img of n.data.images) {
+        images.push({ kind: 'reference', ownerId: n.id, ownerLabel: n.data.label || 'sem nome', role: n.data.role, photoName: img.name, src: img.src, assetId: img.assetId, sha256: img.sha256, mimeType: img.mimeType, width: img.width, height: img.height, byteLength: img.byteLength })
+      }
+    }
+
+    const prompt = composePrompt({
+      scene,
+      cast: cast.map((c, i) => ({ sheet: sheetOf(c), sceneNote: notes[c.id], imageCount: chosen[i].length })),
+      references: refNodes.map((n) => ({
+        label: n.data.label,
+        role: n.data.role,
+        preserveClothing: n.data.preserveClothing,
+        imageCount: n.data.images.length,
+      })),
+      style,
+    })
+
     return {
-      prompt: buildReferencePrompt(scene, groups),
+      model,
+      scene,
+      prompt,
+      images,
+      omitted,
+      characters: cast.map((c, i) => ({
+        id: c.id,
+        name: c.name,
+        version: c.version,
+        sheet: sheetOf(c),
+        sceneNote: notes[c.id] ?? '',
+        sent: chosen[i].length,
+        total: castPhotos[i].length,
+      })),
+      references: refNodes.map((n) => ({ label: n.data.label || 'sem nome', role: n.data.role, count: n.data.images.length })),
+      style,
+      inputFidelity: hasImages ? effectiveFidelity(model, node.data.inputFidelity) : undefined,
+    }
+  }
+
+  // Lê os BYTES das fotos planejadas (biblioteca ou referências). As fotos
+  // vão de verdade no pedido — nunca são trocadas por descrição em texto.
+  async function materializePlan(plan: GenerationPlan): Promise<PreparedReferences | { error: string }> {
+    const inputs: ReferenceImageInput[] = []
+    try {
+      for (const img of plan.images) {
+        let bytes: Uint8Array | undefined
+        if (img.src?.startsWith('data:')) bytes = dataUrlToBytes(img.src).bytes
+        else if (img.assetId && isPersistent()) {
+          const asset = await repository.getAsset(img.assetId)
+          if (asset) bytes = new Uint8Array(asset.bytes)
+        }
+        if (!bytes) throw new Error(`a foto "${img.photoName}" (${img.ownerLabel}) não foi encontrada no armazenamento`)
+        inputs.push({ sha256: img.sha256, mimeType: img.mimeType, byteLength: bytes.byteLength, width: img.width, height: img.height, b64: bytesToBase64(bytes) })
+      }
+    } catch (err) {
+      return { error: `Referência indisponível: ${errorMessage(err, 'erro ao ler a foto')}.` }
+    }
+    return {
+      prompt: plan.prompt,
       inputs,
-      sourceRefs,
-      inputFidelity: effectiveFidelity(model, wantedFidelity),
+      sourceRefs: plan.images.map((img) => ({ assetId: img.assetId, sha256: img.sha256, label: img.ownerLabel, role: img.role })),
+      inputFidelity: plan.inputFidelity,
+    }
+  }
+
+  // Contexto que fica registrado em cada imagem gerada (inclusive a ficha
+  // dos personagens como estava — editar depois não apaga esse histórico).
+  function planContext(plan: GenerationPlan): Partial<GenerationContext> {
+    return {
+      prompt: plan.prompt,
+      characters: plan.characters.map((c) => ({
+        characterId: c.id,
+        version: c.version,
+        sheet: { ...c.sheet },
+        sceneNote: c.sceneNote || undefined,
+        photoSha256: plan.images.filter((img) => img.kind === 'character' && img.ownerId === c.id).map((img) => img.sha256),
+      })),
+      styleGuideApplied: !!plan.style,
     }
   }
 
@@ -591,8 +713,9 @@ export const useFlowStore = create<FlowState>((set, get) => {
       // arquivos de projetos que já não existem (ex.: app fechado no meio
       // da exclusão de um fluxo)
       const projectIds = new Set(records.map((r) => r.id))
+      // (as fotos da biblioteca de personagens não pertencem a projeto nenhum)
       strayAssetIds = (await repository.listAssetOwners())
-        .filter((o) => !projectIds.has(o.projectId))
+        .filter((o) => o.projectId !== LIBRARY_PROJECT_ID && !projectIds.has(o.projectId))
         .map((o) => o.assetId)
     } catch (err) {
       // não conseguimos ler: não arrisca sobrescrever nada
@@ -690,7 +813,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
         id: nextId('image'),
         type: 'image',
         position,
-        data: defaultImageData(),
+        data: defaultImageData(get().flowsData[flowId]?.styleGuide),
         dragHandle: '.ifs-node__header',
       }
       updateFlowSlice(flowId, (slice) => ({ ...slice, nodes: [...slice.nodes, node] }))
@@ -759,6 +882,36 @@ export const useFlowStore = create<FlowState>((set, get) => {
       void discardAssets(flowId, assetId ? [assetId] : [])
     },
 
+    setCast: (flowId, imageNodeId, castIds) => {
+      const unique = [...new Set(castIds)]
+      updateImageNode(flowId, imageNodeId, (data) => {
+        const notes = Object.fromEntries(Object.entries(data.castNotes ?? {}).filter(([id]) => unique.includes(id)))
+        return { ...data, castIds: unique, castNotes: notes, notice: undefined }
+      })
+    },
+
+    setCastNote: (flowId, imageNodeId, characterId, note) => {
+      updateImageNode(flowId, imageNodeId, (data) => ({
+        ...data,
+        castNotes: { ...(data.castNotes ?? {}), [characterId]: note.slice(0, 500) },
+      }))
+    },
+
+    updateStyleGuide: (flowId, partial) => {
+      updateFlowSlice(flowId, (slice) => ({
+        ...slice,
+        styleGuide: { ...(slice.styleGuide ?? defaultStyleGuide()), ...partial },
+      }))
+    },
+
+    getGenerationPreview: (flowId, imageNodeId) => {
+      const slice = get().flowsData[flowId]
+      if (!slice || !findImageNode(flowId, imageNodeId)) return { error: 'Nó não encontrado.' }
+      const scene = getConnectedPrompt(slice, imageNodeId)
+      if (!scene) return { error: 'Conecte um nó de prompt com texto para ver as instruções.' }
+      return planGenerationInputs(flowId, imageNodeId, scene)
+    },
+
     deleteNode: (flowId, id) => {
       const removedAssets = collectAssetIds(get().flowsData[flowId]?.nodes.filter((n) => n.id === id) ?? [])
       updateFlowSlice(flowId, (slice) => ({
@@ -825,7 +978,7 @@ export const useFlowStore = create<FlowState>((set, get) => {
       const meta: FlowMeta = { id, name: `Fluxo ${get().flows.length + 1}`, createdAt: now, updatedAt: now }
 
       set((state) => ({
-        flowsData: { ...state.flowsData, [id]: { nodes: [], edges: [] } },
+        flowsData: { ...state.flowsData, [id]: { nodes: [], edges: [], styleGuide: defaultStyleGuide() } },
         flows: [...state.flows, meta],
       }))
       void persistNow(id)
@@ -870,13 +1023,24 @@ export const useFlowStore = create<FlowState>((set, get) => {
       const count = clampCount(node.data.count)
       const setNotice = (notice: string) => updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice }))
 
-      // referências conectadas: as fotos vão junto (só espera quando existem)
+      // personagens + referências + guia de estilo; as fotos só são lidas
+      // (de forma assíncrona) quando existem
+      const plan = planGenerationInputs(flowId, imageNodeId, prompt)
+      if ('error' in plan) {
+        updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: plan.error }))
+        return
+      }
+      prompt = plan.prompt
+      ctx = { ...ctx, ...planContext(plan) }
       let refs: PreparedReferences | null = null
-      if (hasReferenceEdges(flowId, imageNodeId)) {
-        refs = await loadReferences(flowId, imageNodeId, config.model, node.data.inputFidelity, prompt)
-        if (!refs) return
-        prompt = refs.prompt
-        ctx = { ...ctx, prompt, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
+      if (plan.images.length) {
+        const loaded = await materializePlan(plan)
+        if ('error' in loaded) {
+          updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: loaded.error }))
+          return
+        }
+        refs = loaded
+        ctx = { ...ctx, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
       }
       const refJob = refs?.inputs.length
         ? { references: refs.inputs.map(toDescriptor), ...(refs.inputFidelity ? { inputFidelity: refs.inputFidelity } : {}) }
@@ -970,12 +1134,24 @@ export const useFlowStore = create<FlowState>((set, get) => {
       const previous = node.data.images.find((s) => s.id === slotId)
       if (!previous) return
 
+      // personagens + referências + guia de estilo; as fotos só são lidas
+      // (de forma assíncrona) quando existem
+      const plan = planGenerationInputs(flowId, imageNodeId, prompt)
+      if ('error' in plan) {
+        updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: plan.error }))
+        return
+      }
+      prompt = plan.prompt
+      ctx = { ...ctx, ...planContext(plan) }
       let refs: PreparedReferences | null = null
-      if (hasReferenceEdges(flowId, imageNodeId)) {
-        refs = await loadReferences(flowId, imageNodeId, config.model, node.data.inputFidelity, prompt)
-        if (!refs) return
-        prompt = refs.prompt
-        ctx = { ...ctx, prompt, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
+      if (plan.images.length) {
+        const loaded = await materializePlan(plan)
+        if ('error' in loaded) {
+          updateImageNode(flowId, imageNodeId, (data) => ({ ...data, notice: loaded.error }))
+          return
+        }
+        refs = loaded
+        ctx = { ...ctx, references: refs.sourceRefs, inputFidelity: refs.inputFidelity }
       }
       const refJob = refs?.inputs.length
         ? { references: refs.inputs.map(toDescriptor), ...(refs.inputFidelity ? { inputFidelity: refs.inputFidelity } : {}) }

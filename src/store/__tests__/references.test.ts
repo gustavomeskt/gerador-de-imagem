@@ -65,6 +65,7 @@ const imgNode = (flowId: string, id: string) => nodeOf<ImageFlowNode>(flowId, id
 
 function setup(model: 'gpt-image-1.5' | 'gpt-image-1-mini' | 'dall-e-3' = 'gpt-image-1.5') {
   const flowId = S().createFlow()
+  S().updateStyleGuide(flowId, { enabled: false }) // guia de estilo testado à parte
   S().addPromptNode(flowId, { x: 0, y: 0 })
   S().addImageNode(flowId, { x: 400, y: 0 })
   const [p, i] = S().flowsData[flowId].nodes

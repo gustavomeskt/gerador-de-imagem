@@ -1,7 +1,9 @@
 import JSZip from 'jszip'
 import { dataUrlToBytes, extensionFor, readImageSize, sha256Hex } from '../lib/binary'
 import type { AssetRecord, AssetSource } from '../persistence/schema'
-import type { FlowMeta, FlowSlice, ImageFlowNode } from '../store/types'
+import type { FlowMeta, FlowSlice, ImageFlowNode, ReferenceFlowNode } from '../store/types'
+import { sheetOf, type Character } from '../generation/characters'
+import type { StyleGuide } from '../generation/styleGuide'
 
 // Exportação do projeto em ZIP: todas as imagens prontas, em ordem, com nomes
 // padronizados, e um manifest.json descrevendo cada arquivo (origem, prompt,
@@ -48,6 +50,38 @@ export interface ManifestSkipped {
   reason: string
 }
 
+// Arquivo de entrada (referência ou foto de personagem) incluído no ZIP.
+export interface ManifestInputFile {
+  file: string
+  name: string
+  mimeType: string
+  width: number | null
+  height: number | null
+  byteLength: number
+  sha256: string
+}
+
+export interface ManifestReferenceNode {
+  nodeId: string
+  label: string
+  role: string
+  preserveClothing: boolean
+  files: ManifestInputFile[]
+  missing: string[]
+}
+
+export interface ManifestCharacter {
+  id: string
+  name: string | null
+  version: number | null
+  sheet: Record<string, string> | null
+  primaryPhotoId: string | null
+  files: ManifestInputFile[]
+  missing: string[]
+  deletedFromLibrary: boolean
+  usedInNodes: string[]
+}
+
 export interface ProjectManifest {
   formatVersion: number
   generator: string
@@ -58,6 +92,10 @@ export interface ProjectManifest {
   groups: ManifestGroup[]
   images: ManifestImage[]
   skipped: ManifestSkipped[]
+  // fotos originais usadas como referência e fichas dos personagens
+  referenceNodes: ManifestReferenceNode[]
+  characters: ManifestCharacter[]
+  styleGuide: StyleGuide | null
 }
 
 export type AssetLoader = (assetId: string) => Promise<AssetRecord | undefined>
@@ -118,10 +156,24 @@ async function loadSlotBytes(
   return 'imagem indisponível'
 }
 
+async function loadInputBytes(
+  item: { assetId?: string; src?: string },
+  loadAsset: AssetLoader,
+): Promise<Uint8Array | undefined> {
+  if (item.assetId) {
+    const asset = await loadAsset(item.assetId)
+    if (asset) return new Uint8Array(asset.bytes)
+  }
+  if (item.src?.startsWith('data:')) return dataUrlToBytes(item.src).bytes
+  return undefined
+}
+
 export async function buildProjectZip(params: {
   meta: FlowMeta
   slice: FlowSlice
   loadAsset: AssetLoader
+  // biblioteca atual (pra incluir fotos e fichas dos personagens usados)
+  characters?: Character[]
   now?: Date
 }): Promise<ProjectZip> {
   const { meta, slice, loadAsset } = params
@@ -188,6 +240,76 @@ export async function buildProjectZip(params: {
     })
   }
 
+  // fotos originais dos nós de referência
+  const addInput = async (
+    folder: string,
+    index: number,
+    item: { assetId?: string; src?: string; name: string; mimeType: string; width?: number; height?: number },
+  ): Promise<ManifestInputFile | null> => {
+    const bytes = await loadInputBytes(item, loadAsset)
+    if (!bytes) return null
+    const file = `${folder}/${pad(index, 2)}_${slugify(item.name.replace(/\.[a-z0-9]+$/i, ''))}.${extensionFor(item.mimeType)}`
+    zip.file(file, bytes, { binary: true })
+    return {
+      file,
+      name: item.name,
+      mimeType: item.mimeType,
+      width: item.width ?? null,
+      height: item.height ?? null,
+      byteLength: bytes.byteLength,
+      sha256: await sha256Hex(bytes),
+    }
+  }
+
+  const referenceNodes: ManifestReferenceNode[] = []
+  const refNodes = slice.nodes
+    .filter((n): n is ReferenceFlowNode => n.type === 'reference')
+    .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+  for (const [i, node] of refNodes.entries()) {
+    const folder = `referencias/${pad(i + 1, 2)}_${slugify(node.data.label || 'referencia')}`
+    const files: ManifestInputFile[] = []
+    const missing: string[] = []
+    for (const [j, img] of node.data.images.entries()) {
+      const added = await addInput(folder, j + 1, img)
+      if (added) files.push(added)
+      else missing.push(img.name)
+    }
+    referenceNodes.push({ nodeId: node.id, label: node.data.label, role: node.data.role, preserveClothing: node.data.preserveClothing, files, missing })
+  }
+
+  // personagens da biblioteca usados no projeto (fotos + ficha atual)
+  const usage = new Map<string, string[]>()
+  for (const node of nodes) {
+    for (const id of node.data.castIds ?? []) usage.set(id, [...(usage.get(id) ?? []), node.id])
+  }
+  const characters: ManifestCharacter[] = []
+  for (const [id, usedInNodes] of usage) {
+    const c = params.characters?.find((x) => x.id === id)
+    if (!c) {
+      characters.push({ id, name: null, version: null, sheet: null, primaryPhotoId: null, files: [], missing: [], deletedFromLibrary: true, usedInNodes })
+      continue
+    }
+    const folder = `personagens/${slugify(c.name)}_${id.slice(-6)}`
+    const files: ManifestInputFile[] = []
+    const missing: string[] = []
+    for (const [j, photo] of c.photos.entries()) {
+      const added = await addInput(folder, j + 1, photo)
+      if (added) files.push(added)
+      else missing.push(photo.name)
+    }
+    characters.push({
+      id,
+      name: c.name,
+      version: c.version,
+      sheet: { ...sheetOf(c) },
+      primaryPhotoId: c.primaryPhotoId,
+      files,
+      missing,
+      deletedFromLibrary: false,
+      usedInNodes,
+    })
+  }
+
   const manifest: ProjectManifest = {
     formatVersion: MANIFEST_FORMAT_VERSION,
     generator: 'image-flow-studio',
@@ -203,6 +325,9 @@ export async function buildProjectZip(params: {
     groups,
     images,
     skipped,
+    referenceNodes,
+    characters,
+    styleGuide: slice.styleGuide ?? null,
   }
 
   zip.file('manifest.json', JSON.stringify(manifest, null, 2))

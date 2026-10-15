@@ -1,6 +1,7 @@
 import type { Edge, Node } from '@xyflow/react'
 import type { ImageModel } from '../generation/models'
 import type { InputFidelity, ReferenceMimeType, ReferenceRole } from '../generation/references'
+import type { StyleGuide } from '../generation/styleGuide'
 
 export interface PromptNodeData {
   prompt: string
@@ -29,6 +30,10 @@ export interface ImageNodeData {
   notice?: string
   // fidelidade às imagens de referência conectadas (só modelos que aceitam)
   inputFidelity?: InputFidelity
+  // personagens da biblioteca nesta cena (ids estáveis) e ajustes só desta
+  // cena por personagem — a ficha permanente não muda
+  castIds?: string[]
+  castNotes?: Record<string, string>
   [key: string]: unknown
 }
 
@@ -73,4 +78,5 @@ export interface FlowMeta {
 export interface FlowSlice {
   nodes: FlowNode[]
   edges: Edge[]
+  styleGuide?: StyleGuide
 }

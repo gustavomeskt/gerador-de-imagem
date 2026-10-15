@@ -240,6 +240,80 @@ ao reabrir o app. A mesma foto usada em vários nós é guardada **uma vez só**
 e `MAX_REFERENCE_FILE_MB` (padrão 8, máx. 50). O limite de tamanho da
 requisição com fotos é calculado a partir deles (ou `MAX_EDIT_BODY_BYTES`).
 
+## Biblioteca de personagens
+
+Aba **Personagens** na tela inicial: cadastre cada pessoa **uma vez** e use
+em quantas historinhas quiser. A biblioteca é independente dos projetos — os
+projetos guardam só o **identificador** do personagem, e as fotos ficam
+guardadas uma única vez.
+
+**Ficha de cada personagem:** identificador único, nome, fotografia
+principal do rosto (estrela), fotos adicionais (até 6 no total), descrição
+física permanente, idade aparente, características do rosto, cabelo,
+características marcantes, roupa padrão (opcional), instruções de preservação
+visual, datas de criação/atualização e versão (sobe a cada edição).
+
+Ações: **criar**, **ver/editar**, **duplicar** (nova ficha usando os mesmos
+arquivos de foto) e **excluir**.
+
+**Usar numa cena:** no nó de Imagem, em *Personagens da biblioteca*, escolha
+um ou mais personagens. Em cada um há o campo **"Nesta cena"** para ajustes
+só daquela cena (ex.: "de pijama, rindo") — a ficha permanente não muda.
+As fotos cadastradas vão **de verdade** para o modelo (mesma integração de
+referências da Etapa 3), nunca trocadas por descrição em texto.
+
+- Ordem das fotos: a **principal de cada personagem** primeiro, depois as
+  fotos dos nós de referência, depois as fotos extras dos personagens em
+  rodízio até o limite de 6 por geração. Fotos que não couberem aparecem
+  listadas na pré-visualização.
+- Cenas com várias pessoas recebem a regra de não misturar identidades e de
+  mostrar cada pessoa uma vez.
+
+**Exclusão segura:** antes de excluir, o app mostra em quais projetos (e
+quantos nós) o personagem é usado. Depois de excluído, esses nós mostram
+"Personagem excluído da biblioteca" e **não geram** até você trocá-lo ou
+restaurar o backup — nada quebra em silêncio. Imagens já geradas não são
+apagadas, e cada uma guarda a ficha do personagem **como estava** na geração
+(editar depois não altera esse histórico).
+
+**Backup da biblioteca** (botões na aba Personagens): **Exportar backup**
+gera um ZIP com as fichas, os metadados e as **fotos originais**
+(`backup.json` + `fotos/`). **Importar backup** valida tudo antes de gravar —
+formato, campos, tipo real e tamanho de cada foto e o hash SHA-256 de cada
+arquivo; caminhos suspeitos e fotos adulteradas são recusados. Um personagem
+com problema não impede os outros. Se o personagem já existe, fica a versão
+mais recente (o backup mais antigo é ignorado). Restaurar um personagem
+excluído (mesmo identificador) faz os projetos que o usavam voltarem a
+funcionar.
+
+> **A preservação do rosto depende do modelo.** O app envia as fotos e as
+> instruções da ficha; quão fiel o resultado fica (rosto, idade, cabelo,
+> roupa, várias pessoas na mesma cena) só pode ser avaliado com chamadas
+> reais à OpenAI.
+
+## Guia de estilo do projeto
+
+Ícone de paleta ao lado do nome do fluxo. Cada projeto tem o seu guia:
+estilo visual padrão, fotografia realista e natural, iluminação, qualidade
+visual pretendida, proporção preferida, características permanentes dos
+ambientes e regras de continuidade de roupas e objetos.
+
+- **Padrão dos projetos novos:** fotorrealista, vertical **9:16**, sem
+  textos, legendas, logos ou marcas-d'água. Nós de imagem novos já nascem na
+  proporção preferida.
+- Projetos criados antes desta versão recebem o guia **desligado**, para
+  continuarem gerando como antes (dá para ligar no mesmo diálogo).
+- O guia só diz **como** a imagem deve parecer: as instruções pedem para
+  mostrar apenas o que a cena descreve, sem inventar acontecimentos.
+
+## Ver as instruções antes de gerar
+
+Botão **Ver instruções** no nó de Imagem: mostra os personagens (com as fotos
+que vão ser enviadas e a ficha), as referências avulsas, o guia de estilo e o
+**texto final** enviado ao modelo — exatamente a mesma montagem usada na
+geração. Ordem do texto: o que é cada imagem anexada → regra de separação de
+pessoas → guia de estilo → a cena, exatamente como foi escrita.
+
 ## Armazenamento e exportação
 
 Projetos (fluxos) e imagens geradas são salvos **automaticamente** no
@@ -251,8 +325,10 @@ navegador, no IndexedDB (`src/persistence/`):
 - Gerar de novo só apaga a imagem antiga **depois** que a nova foi salva; se a
   geração falhar, as imagens anteriores são mantidas.
 - Apagar uma imagem, um nó ou um fluxo apaga os arquivos correspondentes.
-- O banco já tem as tabelas reservadas para as próximas etapas: personagens,
-  storyboards, cenas, prompts e versões de imagem.
+- A biblioteca de personagens usa a tabela `characters`; as fotos dela ficam
+  na tabela de arquivos como parte da biblioteca (não de um projeto). Tabelas
+  reservadas para as próximas etapas: storyboards, cenas, prompts e versões
+  de imagem.
 - Fluxos da versão anterior (que ficavam no `localStorage`) são copiados para
   o banco na primeira abertura. A cópia antiga **não é apagada**.
 
@@ -263,16 +339,22 @@ nomes padronizados, mais um `manifest.json`:
 ```
 campanha-gelatina_2026-10-15_14-52.zip
 ├── manifest.json
-└── imagens/
-    ├── 001_grupo-01_imagem-01.png
-    ├── 002_grupo-01_imagem-02.png
-    └── 003_grupo-02_imagem-01.png
+├── imagens/
+│   ├── 001_grupo-01_imagem-01.png
+│   └── 002_grupo-02_imagem-01.png
+├── referencias/          ← fotos originais dos nós de referência
+│   └── 01_pote-verde/01_pote.webp
+└── personagens/          ← fotos dos personagens usados no projeto
+    └── dona-maria_a1b2c3/01_maria-frente.png
 ```
 
 Grupo = nó de imagem, na ordem do canvas (de cima para baixo, depois da
 esquerda para a direita). O manifest traz, para cada arquivo, o prompt, o
 modelo, o tamanho, as dimensões, o provedor e o hash SHA-256 (para conferir a
-integridade).
+integridade). Ele também lista os nós de referência, os personagens usados
+(com a ficha atual, ou marcados como excluídos da biblioteca) e o guia de
+estilo do projeto; cada imagem registra quais fotos e qual versão da ficha
+foram usadas.
 
 ### Limitações — isto não é backup
 
@@ -288,21 +370,24 @@ integridade).
   sem salvar nada e avisa.
 - Não edite o mesmo fluxo em duas abas ao mesmo tempo: a última gravação
   prevalece.
-- O ZIP ainda não pode ser importado de volta para o app.
+- O ZIP do projeto ainda não pode ser importado de volta para o app (o
+  backup da biblioteca de personagens pode).
 
 ## Telas
 
-**Tela inicial** (abre ao carregar o app) — menu lateral com duas abas:
+**Tela inicial** (abre ao carregar o app) — menu lateral com três abas:
 - **Fluxos**: lista os fluxos salvos como cards. Clique num card pra abrir,
   no ícone de arquivo pra exportar o ZIP, no ícone de lixeira pra apagar, ou
   em **+ Novo fluxo** pra criar um e já entrar nele.
+- **Personagens**: biblioteca de personagens, com backup (exportar/importar).
 - **Configuração**: escolha o provedor de geração (simulado ou backend
   seguro). Se uma API key de versão anterior ainda estiver salva no
   navegador, aparece um botão pra apagá-la.
 
 **Tela do fluxo** — canvas do React Flow com:
 - Botão de voltar (seta) + nome do fluxo no canto superior esquerdo. Clique
-  no nome pra renomear. Ao lado, o botão de exportar o fluxo em ZIP.
+  no nome pra renomear. Ao lado, os botões de exportar o fluxo em ZIP e do
+  guia de estilo.
 - Dock flutuante à esquerda com os botões **Prompt**, **Imagem** e
   **Referência** pra criar nós.
 

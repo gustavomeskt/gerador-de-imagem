@@ -1,4 +1,5 @@
 import { repository } from '../persistence/repository'
+import { useCharacterStore } from '../store/useCharacterStore'
 import { useFlowStore } from '../store/useFlowStore'
 import type { ProjectManifest } from './projectZip'
 
@@ -16,6 +17,7 @@ export async function exportProjectZip(flowId: string): Promise<ProjectManifest>
     meta,
     slice,
     loadAsset: (id) => (persistent ? repository.getAsset(id) : Promise.resolve(undefined)),
+    characters: useCharacterStore.getState().characters,
   })
 
   const url = URL.createObjectURL(new Blob([data as BlobPart], { type: 'application/zip' }))

@@ -11,6 +11,7 @@ import ImageNode from './nodes/ImageNode'
 import PromptNode from './nodes/PromptNode'
 import ReferenceNode from './nodes/ReferenceNode'
 import { FlowIdContext } from './store/flowIdContext'
+import { useCharacterStore } from './store/useCharacterStore'
 import { isValidFlowConnection, useFlowStore } from './store/useFlowStore'
 import './index.css'
 
@@ -71,12 +72,16 @@ function HomeRoute() {
 }
 
 export default function App() {
-  const hydrated = useFlowStore((s) => s.hydrated)
+  const flowsHydrated = useFlowStore((s) => s.hydrated)
   const hydrate = useFlowStore((s) => s.hydrate)
+  const charactersHydrated = useCharacterStore((s) => s.hydrated)
+  const hydrateCharacters = useCharacterStore((s) => s.hydrate)
+  const hydrated = flowsHydrated && charactersHydrated
 
   useEffect(() => {
     void hydrate()
-  }, [hydrate])
+    void hydrateCharacters()
+  }, [hydrate, hydrateCharacters])
 
   if (!hydrated) {
     return (

@@ -62,6 +62,7 @@ await useFlowStore.getState().hydrate()
 function setupFlow() {
   const s = useFlowStore.getState()
   const flowId = s.createFlow()
+  s.updateStyleGuide(flowId, { enabled: false }) // guia de estilo testado à parte
   s.addPromptNode(flowId, { x: 0, y: 0 })
   s.addImageNode(flowId, { x: 400, y: 0 })
   const [p, i] = useFlowStore.getState().flowsData[flowId].nodes

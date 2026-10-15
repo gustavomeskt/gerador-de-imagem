@@ -97,45 +97,9 @@ export interface ReferenceGroup {
   imageCount: number
 }
 
-const ROLE_INSTRUCTIONS: Record<ReferenceRole, (g: ReferenceGroup) => string> = {
-  character: (g) =>
-    'the same real person. Keep their identity exactly: same face and facial features, same apparent age, ' +
-    'same skin tone, same hair color, length and hairstyle, same body type. Facial expression, pose and camera ' +
-    'angle may change naturally to fit the scene.' +
-    (g.preserveClothing
-      ? ' Keep the same clothing and accessories shown in the reference.'
-      : ' Clothing may follow the scene description.'),
-  clothing: () => 'clothing reference: dress the character in exactly this outfit (garments, colors, fabric and details).',
-  object: () => 'object / setting reference: keep its shape, colors, proportions and details recognizable.',
-  style: () => 'visual style reference: match its look (lighting, color palette, rendering). Do not copy its content.',
-}
-
-function imageRange(start: number, count: number): string {
-  return count === 1 ? `Image ${start}` : `Images ${start}-${start + count - 1}`
-}
-
-// Texto que acompanha as imagens: diz qual imagem é de quem e o que manter.
-// NÃO substitui as referências — as fotos sempre vão junto na chamada.
-export function buildReferencePrompt(scene: string, groups: ReferenceGroup[]): string {
-  if (groups.length === 0) return scene
-  let next = 1
-  const lines = groups.map((g) => {
-    const line = `- ${imageRange(next, g.imageCount)}: "${g.label.trim() || 'sem nome'}" — ${ROLE_INSTRUCTIONS[g.role](g)}`
-    next += g.imageCount
-    return line
-  })
-  const people = groups.filter((g) => g.role === 'character').length
-  return [
-    'Reference images are attached, in this order:',
-    ...lines,
-    people > 1 ? 'Each person must keep their own identity; never mix or swap features between different people.' : null,
-    'Do not add any text, captions, logos or watermarks to the image.',
-    '',
-    `Scene: ${scene}`,
-  ]
-    .filter((l) => l !== null)
-    .join('\n')
-}
+// O texto que associa cada imagem ao seu papel fica em promptComposer.ts
+// (junto com as fichas de personagem e o guia de estilo).
+export { buildReferencePrompt } from './promptComposer'
 
 export function toDescriptor(r: ReferenceDescriptor): ReferenceDescriptor {
   return { sha256: r.sha256, mimeType: r.mimeType, byteLength: r.byteLength, width: r.width, height: r.height }

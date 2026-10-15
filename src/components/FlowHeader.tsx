@@ -1,7 +1,8 @@
-import { ArrowLeft, FileArchive, Loader2 } from 'lucide-react'
+import { ArrowLeft, FileArchive, Loader2, Palette } from 'lucide-react'
 import { useState } from 'react'
 import { exportProjectZip } from '../export/exportProject'
 import { useFlowStore } from '../store/useFlowStore'
+import StyleGuideDialog from './StyleGuideDialog'
 
 interface FlowHeaderProps {
   flowId: string
@@ -16,6 +17,8 @@ export default function FlowHeader({ flowId, onBack }: FlowHeaderProps) {
   const [draft, setDraft] = useState(name)
   const [exporting, setExporting] = useState(false)
   const [exportMessage, setExportMessage] = useState<string | null>(null)
+  const [styleOpen, setStyleOpen] = useState(false)
+  const styleEnabled = useFlowStore((s) => s.flowsData[flowId]?.styleGuide?.enabled ?? false)
 
   function startEditing() {
     setDraft(name)
@@ -73,6 +76,15 @@ export default function FlowHeader({ flowId, onBack }: FlowHeaderProps) {
       >
         {exporting ? <Loader2 size={15} className="ifs-spin" /> : <FileArchive size={15} />}
       </button>
+      <button
+        type="button"
+        className={styleEnabled ? 'ifs-flow-header__back ifs-flow-header__style--on' : 'ifs-flow-header__back'}
+        onClick={() => setStyleOpen(true)}
+        title={styleEnabled ? 'Guia de estilo (ativo)' : 'Guia de estilo (desligado)'}
+      >
+        <Palette size={15} />
+      </button>
+      {styleOpen && <StyleGuideDialog flowId={flowId} onClose={() => setStyleOpen(false)} />}
       {exportMessage && (
         <small className="ifs-flow-header__message" onClick={() => setExportMessage(null)}>
           {exportMessage}

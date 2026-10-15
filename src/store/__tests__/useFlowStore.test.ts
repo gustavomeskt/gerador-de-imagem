@@ -30,6 +30,8 @@ async function labelOf(slot: ImageSlot): Promise<string | undefined> {
 function setupFlow(prompt = 'Uma mulher na cozinha') {
   const store = useFlowStore.getState()
   const flowId = store.createFlow()
+  // comportamento das etapas anteriores: sem guia de estilo (testado à parte)
+  store.updateStyleGuide(flowId, { enabled: false })
   store.addPromptNode(flowId, { x: 0, y: 0 })
   store.addImageNode(flowId, { x: 400, y: 0 })
   const [promptNode, imageNode] = useFlowStore.getState().flowsData[flowId].nodes

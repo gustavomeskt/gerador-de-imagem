@@ -1,6 +1,7 @@
 import { Handle, NodeResizer, Position, type NodeProps } from '@xyflow/react'
 import {
   AlertTriangle,
+  Eye,
   ChevronDown,
   Download,
   ImageIcon,
@@ -19,7 +20,11 @@ import {
   MODEL_SIZES,
   type ImageModel,
 } from '../generation/models'
+import { orderedPhotos } from '../generation/characters'
 import { REFERENCE_SUPPORT, type InputFidelity } from '../generation/references'
+import PromptPreviewDialog from '../components/PromptPreviewDialog'
+import { useCharacterStore } from '../store/useCharacterStore'
+import { useState } from 'react'
 import { useFlowId } from '../store/flowIdContext'
 import { useFlowStore, type ImageNodeData, type ImageSlot } from '../store/useFlowStore'
 
@@ -47,6 +52,12 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
   })
   const [referenceCount, referencePhotos] = referenceSummary.split(':').map(Number)
   const refSupport = REFERENCE_SUPPORT[data.model]
+  const library = useCharacterStore((s) => s.characters)
+  const setCast = useFlowStore((s) => s.setCast)
+  const setCastNote = useFlowStore((s) => s.setCastNote)
+  const [previewOpen, setPreviewOpen] = useState(false)
+  const castIds = data.castIds ?? []
+  const available = library.filter((c) => !castIds.includes(c.id))
   const qualities = MODEL_QUALITIES[data.model]
   const sizes = MODEL_SIZES[data.model]
   const isGenerating = data.images.some((img) => img.status === 'loading')
@@ -54,9 +65,12 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
   function handleModelChange(model: ImageModel) {
     const newSizes = MODEL_SIZES[model]
     const newQualities = MODEL_QUALITIES[model]
+    // mantém a proporção atual (ex.: 9:16) se o novo modelo também tiver
+    const currentAspect = MODEL_SIZES[data.model].find((s) => s.value === data.size)?.aspect
+    const sameAspect = newSizes.find((s) => currentAspect !== undefined && Math.abs(s.aspect - currentAspect) < 0.01)
     updateImageConfig(flowId, id, {
       model,
-      size: newSizes[0].value,
+      size: (sameAspect ?? newSizes[0]).value,
       quality: newQualities ? newQualities[0].value : undefined,
     })
   }
@@ -203,6 +217,55 @@ export default function ImageNode({ id, data, selected }: NodeProps & { data: Im
           )}
         </div>
       )}
+
+      <div className="ifs-image__cast nodrag nowheel">
+        <div className="ifs-image__cast-head">
+          <span>Personagens da biblioteca</span>
+          <button type="button" className="ifs-image__preview-btn" onClick={() => setPreviewOpen(true)}>
+            <Eye size={13} /> Ver instruções
+          </button>
+        </div>
+        {castIds.map((cid) => {
+          const c = library.find((x) => x.id === cid)
+          const photo = c ? orderedPhotos(c)[0] : undefined
+          return (
+            <div key={cid} className={c ? 'ifs-cast-chip' : 'ifs-cast-chip ifs-cast-chip--missing'}>
+              {photo?.src ? <img src={photo.src} alt="" /> : <span className="ifs-cast-chip__avatar" />}
+              <div className="ifs-cast-chip__body">
+                <strong>{c ? c.name : 'Personagem excluído da biblioteca'}</strong>
+                {c ? (
+                  <input
+                    type="text"
+                    placeholder="Nesta cena (opcional): ex. de avental, rindo"
+                    value={data.castNotes?.[cid] ?? ''}
+                    maxLength={500}
+                    onChange={(e) => setCastNote(flowId, id, cid, e.target.value)}
+                  />
+                ) : (
+                  <small>Remova-o ou restaure o backup para gerar.</small>
+                )}
+              </div>
+              <button type="button" title="Tirar da cena" onClick={() => setCast(flowId, id, castIds.filter((x) => x !== cid))}>
+                <X size={13} />
+              </button>
+            </div>
+          )
+        })}
+        {available.length > 0 ? (
+          <select value="" onChange={(e) => e.target.value && setCast(flowId, id, [...castIds, e.target.value])}>
+            <option value="">+ adicionar personagem à cena…</option>
+            {available.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+        ) : (
+          library.length === 0 && <small className="ifs-image__cast-empty">Cadastre personagens na aba "Personagens".</small>
+        )}
+      </div>
+
+      {previewOpen && <PromptPreviewDialog flowId={flowId} nodeId={id} onClose={() => setPreviewOpen(false)} />}
 
       {data.notice && <div className="ifs-image__notice">{data.notice}</div>}
 

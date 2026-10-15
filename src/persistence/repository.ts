@@ -1,6 +1,8 @@
 import { getDb } from './db'
 import { toStorageError } from './errors'
-import { LIBRARY_STORES, type AssetRecord, type ProjectRecord } from './schema'
+import { LIBRARY_STORES, type AssetRecord, type CharacterRecordData, type LibraryRecord, type ProjectRecord } from './schema'
+
+export type CharacterRecord = LibraryRecord & { data: CharacterRecordData & Record<string, unknown> }
 
 // Acesso ao banco local. Toda falha vira StorageError com mensagem clara
 // (falta de espaço, banco indisponível, erro de gravação).
@@ -86,6 +88,31 @@ export const repository = {
     return run('write', async () => {
       const tx = (await getDb()).transaction('assets', 'readwrite')
       await Promise.all([...ids.map((id) => tx.store.delete(id)), tx.done])
+    })
+  },
+
+  // --- biblioteca de personagens (independente dos projetos) ---
+
+  listCharacters(): Promise<CharacterRecord[]> {
+    return run('read', async () => (await getDb()).getAll('characters') as Promise<CharacterRecord[]>)
+  },
+
+  saveCharacter(record: CharacterRecord): Promise<void> {
+    return run('write', async () => {
+      await (await getDb()).put('characters', record)
+    })
+  },
+
+  // Apaga a ficha e, na MESMA transação, as fotos que nenhum outro
+  // personagem usa (duplicatas compartilham arquivos).
+  deleteCharacter(id: string, photoAssetIds: string[]): Promise<void> {
+    return run('write', async () => {
+      const tx = (await getDb()).transaction(['characters', 'assets'], 'readwrite')
+      await Promise.all([
+        tx.objectStore('characters').delete(id),
+        ...photoAssetIds.map((assetId) => tx.objectStore('assets').delete(assetId)),
+        tx.done,
+      ])
     })
   },
 

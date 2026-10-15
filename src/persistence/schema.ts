@@ -38,6 +38,8 @@ export interface ProjectRecord {
   updatedAt: number
   nodes: PersistedNode[]
   edges: Edge[]
+  // guia de estilo do projeto (ausente em projetos antigos)
+  styleGuide?: unknown
 }
 
 // Tipos de arquivo guardados. Só 'generated' é usado nesta etapa; os outros
@@ -56,6 +58,10 @@ export interface AssetSource {
   // imagens de referência usadas nesta geração, na ordem enviada
   references?: Array<{ assetId?: string; sha256: string; label: string; role: string }>
   inputFidelity?: string
+  // personagens da biblioteca usados, com a ficha COMO ESTAVA na geração —
+  // editar ou excluir o personagem depois não apaga esse registro
+  characters?: Array<{ characterId: string; version: number; sheet: Record<string, string>; sceneNote?: string; photoSha256: string[] }>
+  styleGuideApplied?: boolean
 }
 
 // Referência enviada pela pessoa: a que nó pertence e o nome do arquivo.
@@ -104,6 +110,26 @@ export interface LibraryRecord {
   createdAt: number
   updatedAt: number
   data: Record<string, unknown>
+}
+
+// Personagem como fica salvo na tabela "characters" (projectId = null:
+// pertence à biblioteca, não a um projeto).
+export interface PersistedCharacterPhoto {
+  id: string
+  assetId: string
+  name: string
+  mimeType: string
+  byteLength: number
+  width: number
+  height: number
+  sha256: string
+}
+
+export interface CharacterRecordData {
+  sheet: Record<string, string>
+  photos: PersistedCharacterPhoto[]
+  primaryPhotoId: string
+  version: number
 }
 
 export type LibraryStoreName = 'characters' | 'storyboards' | 'scenes' | 'prompts' | 'imageVersions'

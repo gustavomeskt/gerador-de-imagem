@@ -1,7 +1,8 @@
-import { FileArchive, Plus, Settings, Trash2, Workflow } from 'lucide-react'
+import { FileArchive, Plus, Settings, Trash2, UsersRound, Workflow } from 'lucide-react'
 import { useState, type MouseEvent as ReactMouseEvent } from 'react'
 import { exportProjectZip } from '../export/exportProject'
 import { useFlowStore } from '../store/useFlowStore'
+import CharactersPanel from './CharactersPanel'
 import SettingsPanel from './SettingsPanel'
 
 interface HomeProps {
@@ -9,7 +10,7 @@ interface HomeProps {
 }
 
 export default function Home({ onOpenFlow }: HomeProps) {
-  const [tab, setTab] = useState<'flows' | 'settings'>('flows')
+  const [tab, setTab] = useState<'flows' | 'characters' | 'settings'>('flows')
   const flows = useFlowStore((s) => s.flows)
   const createFlow = useFlowStore((s) => s.createFlow)
   const deleteFlow = useFlowStore((s) => s.deleteFlow)
@@ -44,6 +45,16 @@ export default function Home({ onOpenFlow }: HomeProps) {
         >
           <Workflow size={16} />
           Fluxos
+        </button>
+        <button
+          type="button"
+          className={
+            tab === 'characters' ? 'ifs-home__rail-item ifs-home__rail-item--active' : 'ifs-home__rail-item'
+          }
+          onClick={() => setTab('characters')}
+        >
+          <UsersRound size={16} />
+          Personagens
         </button>
         <button
           type="button"
@@ -94,6 +105,8 @@ export default function Home({ onOpenFlow }: HomeProps) {
               ))}
             </div>
           </div>
+        ) : tab === 'characters' ? (
+          <CharactersPanel />
         ) : (
           <SettingsPanel />
         )}
