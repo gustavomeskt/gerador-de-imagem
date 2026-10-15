@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { MODEL_MAX_N, type ImageModel } from '../src/generation/models'
 import type { InputFidelity, ReferenceDescriptor } from '../src/generation/references'
 import { ENHANCE_MAX_PROMPT_CHARS } from './validation'
+import { STORY_INTERPRETER_SYSTEM, STORY_JSON_SCHEMA } from '../src/story/llmRequest'
 import { PROMPT_ENHANCER_MAX_OUTPUT_TOKENS, PROMPT_ENHANCER_MODEL, PROMPT_ENHANCER_SYSTEM } from '../src/generation/openaiRequest'
 
 // Estimativa de custo em dólares (USD). É uma ESTIMATIVA: os preços da OpenAI
@@ -28,6 +29,9 @@ export interface PriceTable {
   referenceTokens: { base: number; highFidelityExtra: number }
   // melhorador de prompt: USD por 1 milhão de tokens
   enhancer: { inputPerMTokens: number; outputPerMTokens: number }
+  // interpretação de historinhas: USD por 1 milhão de tokens, por modelo
+  // ("default" vale para modelos sem preço na tabela)
+  story: Record<string, { inputPerMTokens: number; outputPerMTokens: number }>
 }
 
 const GPT_IMAGE_1: Record<string, Record<string, number>> = {
@@ -59,6 +63,12 @@ export const DEFAULT_PRICES: PriceTable = {
   imageInputPerMTokens: { 'gpt-image-1.5': 10, 'gpt-image-1': 10, 'gpt-image-1-mini': 2.5 },
   referenceTokens: { base: 1000, highFidelityExtra: 6240 },
   enhancer: { inputPerMTokens: 0.25, outputPerMTokens: 2 },
+  story: {
+    'gpt-5-mini': { inputPerMTokens: 0.25, outputPerMTokens: 2 },
+    'gpt-5': { inputPerMTokens: 1.25, outputPerMTokens: 10 },
+    // modelo desconhecido: orçado com um valor alto (lado seguro)
+    default: { inputPerMTokens: 2.5, outputPerMTokens: 15 },
+  },
 }
 
 export function loadPriceTable(file: string | undefined): PriceTable {
@@ -70,6 +80,7 @@ export function loadPriceTable(file: string | undefined): PriceTable {
     imageInputPerMTokens: { ...DEFAULT_PRICES.imageInputPerMTokens, ...custom.imageInputPerMTokens },
     referenceTokens: { ...DEFAULT_PRICES.referenceTokens, ...custom.referenceTokens },
     enhancer: { ...DEFAULT_PRICES.enhancer, ...custom.enhancer },
+    story: { ...DEFAULT_PRICES.story, ...custom.story },
   }
 }
 
@@ -154,5 +165,36 @@ export function estimateEnhance(prompt: string, prices: PriceTable): Estimate {
       `saída (teto de ${PROMPT_ENHANCER_MAX_OUTPUT_TOKENS} tokens) = ${usd(outputCost)}`,
     ],
     notes: [`Modelo ${PROMPT_ENHANCER_MODEL}; valor máximo — o real costuma ser menor.`],
+  }
+}
+
+// Pior caso da interpretação: cada parte da copy é uma chamada, com o texto
+// das instruções + esquema + a parte + os nomes da biblioteca, e o teto de
+// saída inteiro cobrado em cada chamada (modelos de raciocínio contam os
+// tokens de raciocínio como saída).
+export function estimateStory(
+  input: { chunks: string[]; libraryNames: string[]; model: string; maxOutputTokens: number },
+  prices: PriceTable,
+): Estimate {
+  const rate = prices.story[input.model] ?? prices.story.default
+  const fixed =
+    estimateTokens(STORY_INTERPRETER_SYSTEM) + estimateTokens(JSON.stringify(STORY_JSON_SCHEMA)) + estimateTokens(input.libraryNames.join(', ')) + 100
+  const inputTokens = input.chunks.reduce((sum, chunk) => sum + fixed + estimateTokens(chunk), 0)
+  const outputTokens = input.chunks.length * input.maxOutputTokens
+  const inputCost = (inputTokens * rate.inputPerMTokens) / 1_000_000
+  const outputCost = (outputTokens * rate.outputPerMTokens) / 1_000_000
+  const notes = [
+    `Modelo ${input.model}; valor máximo (teto de saída em cada chamada) — o real costuma ser bem menor.`,
+    `Estimativa com preços de referência (${PRICES_REFERENCE_DATE}); a cobrança real é a da fatura da OpenAI.`,
+  ]
+  if (!prices.story[input.model]) notes.push(`Sem preço de referência para ${input.model}: orçado com um valor alto.`)
+  return {
+    usd: inputCost + outputCost,
+    breakdown: [
+      `${input.chunks.length} chamada(s) (a copy é dividida em partes)`,
+      `entrada: ~${inputTokens} tokens = ${usd(inputCost)}`,
+      `saída (teto de ${input.maxOutputTokens} tokens × ${input.chunks.length}) = ${usd(outputCost)}`,
+    ],
+    notes,
   }
 }

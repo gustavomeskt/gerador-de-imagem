@@ -1,4 +1,5 @@
 import { renderMockSvg } from '../src/generation/mockProvider'
+import { simulateInterpretation } from '../src/story/simulatedInterpreter'
 import type { ImageClient } from './openaiClient'
 
 // Modo simulado do servidor: percorre exatamente o mesmo caminho do modo real
@@ -41,6 +42,12 @@ export function createSimulatedClient(options: { latencyMs?: number } = {}): Ima
     async enhancePrompt(prompt) {
       await wait()
       return `${prompt}\n\n[servidor simulado] Prompt melhorado de teste, sem alterar o pedido original.`
+    },
+
+    // mesmo interpretador por regras do navegador — nenhum modelo de IA
+    async interpretStory(input) {
+      await wait()
+      return simulateInterpretation(input.chunk, input.libraryNames)
     },
   }
 }

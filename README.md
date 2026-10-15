@@ -127,6 +127,8 @@ Rotas (todas em `/api`, repassadas pelo Vite em desenvolvimento):
 | `POST /api/images/generate` | gera imagens — exige o cabeçalho `X-Cost-Quote`; com `references` usa o endpoint de edição da OpenAI com as fotos |
 | `POST /api/prompts/quote` | orçamento do "Melhorar prompt" |
 | `POST /api/prompts/enhance` | melhora o prompt — exige `X-Cost-Quote` |
+| `POST /api/story/quote` | orçamento da interpretação de uma historinha |
+| `POST /api/story/interpret` | interpreta a copy (modelo de linguagem ou simulado) — exige `X-Cost-Quote` |
 
 Proteções:
 
@@ -314,6 +316,100 @@ que vão ser enviadas e a ficha), as referências avulsas, o guia de estilo e o
 geração. Ordem do texto: o que é cada imagem anexada → regra de separação de
 pessoas → guia de estilo → a cena, exatamente como foi escrita.
 
+## Historinha: copy → storyboard
+
+Botão **Historinha** (ícone de livro) ao lado do nome do fluxo. Cada projeto
+tem uma historinha, com três abas:
+
+1. **Copy** — cole o texto completo e clique em **Salvar copy**. O texto é
+   guardado exatamente como foi colado; nenhuma função do app o altera.
+   **Interpretar historinha** transforma a copy em cenas.
+2. **Personagens** — quem foi identificado na copy, com o status da ligação
+   com a biblioteca (veja abaixo). Dá para escolher o personagem da
+   biblioteca, confirmar, cadastrar ali mesmo (o nome já vem preenchido) ou
+   adicionar manualmente alguém da biblioteca.
+3. **Storyboard** — cards numerados (leves, para 50+ cenas) e um painel de
+   edição da cena selecionada: trecho exato da copy (não editável),
+   personagens, quem fala, fala, ação, ambiente, emoções, figurino, objetos,
+   passagem de tempo, continuidade, enquadramento, câmera, descrição visual,
+   movimento para o Google Flow e o **prompt final** (automático, ou editado
+   à mão). Ações: aprovar, marcar como revisada, dividir, unir com a próxima,
+   mover, filtrar (pendentes, revisadas, aprovadas, com alerta), **aprovar o
+   storyboard completo**, versões anteriores e histórico de revisões.
+
+**Fidelidade à copy (regras aplicadas pelo app, não só pedidas ao modelo):**
+
+- Toda cena aponta para um trecho **literal** da copy (posição + texto). Cena
+  cujo trecho não existe na copy é descartada, com aviso — é assim que um
+  acontecimento inventado é barrado.
+- Uma passagem pode virar várias imagens (mesmo trecho, "imagem 1 de 2").
+- Personagem não citado no trecho, fala que não está no trecho, objeto ou
+  ambiente que não aparece na copy, pronome ("ela") e grupo ("a família")
+  viram **alertas para revisão humana** — nunca um acontecimento novo. Objeto
+  fora da copy fica só como detalhe visual de composição.
+- Trechos da copy sem nenhuma cena aparecem como aviso no storyboard.
+- Não há limite artificial de cenas (testado com 16, 30, 36 e 60).
+
+**Ligação com a biblioteca de personagens (conservadora):**
+
+- Automática só com o **mesmo nome** (ignorando acentos e tratamentos como
+  "Dona", "Seu"): "Dona Maria" ↔ "Maria".
+- Só o primeiro nome ("Seu João" ↔ "João Pedro") ou dois cadastrados com o
+  mesmo nome → **ambíguo**, pede confirmação.
+- Nomes parecidos ("Mariana" × "Maria") **nunca** são ligados.
+- Sem correspondência → **não cadastrado**, com botão para cadastrar. Cena
+  com personagem sem cadastro avisa que ele vai sem foto.
+- A ligação usa o id estável do personagem; o que a pessoa confirma não é
+  desfeito por uma nova interpretação.
+
+**Revisão e segurança das alterações:**
+
+- Editar uma cena a marca como **revisada**; editar uma cena aprovada a
+  devolve para revisão. O storyboard completo aprovado perde a aprovação
+  geral se algo mudar depois.
+- **Reinterpretar** mantém as cenas **aprovadas** como estão; as outras são
+  substituídas e a versão anterior inteira fica em "Versões anteriores"
+  (restaurável).
+- Interpretação que falha, é cancelada, devolve algo inválido ou termina
+  depois de a copy ter sido alterada **não mexe no storyboard**.
+- Alterar e salvar a copy reencontra cada cena no texto novo; a cena cujo
+  trecho sumiu fica sinalizada (nada é apagado).
+
+**Prompt automático de cada cena:** usa o mesmo compositor do nó de Imagem —
+ficha permanente e fotos dos personagens ligados, ação/ambiente/emoções/
+figurino/objetos/continuidade/enquadramento da cena, o guia de estilo do
+projeto (ou o padrão fotorrealista) e sempre **vertical 9:16, sem texto na
+imagem**. O trecho da copy vai junto só como referência de fidelidade, com a
+instrução de não escrevê-lo na imagem.
+
+**Quem interpreta:**
+
+- Provedor **Simulado** (padrão) → **interpretação SIMULADA**, por regras
+  locais no navegador, sem IA e sem custo. Ela separa falas ("Nome: fala",
+  travessão + "disse Fulano") e frases de narração; reconhece nomes com
+  tratamento, falantes e nomes repetidos; ambiente por palavras de lugar
+  ("na cozinha" — "para a escola" é destino, não cenário) com continuidade;
+  passagem de tempo ("mais tarde", "à noite", "no dia seguinte"); roupas e
+  objetos citados; emoções com a palavra da copy; e divide "X, e depois Y" em
+  duas imagens. Serve para testar o fluxo — **revise todas as cenas**.
+- Provedor **Backend** → `POST /api/story/*`. Com o servidor em modo
+  simulado, usa as mesmas regras (sem custo). Em modo `openai`, usa um modelo
+  de linguagem (`STORY_MODEL`, padrão `gpt-5-mini`) com saída estruturada
+  (esquema JSON estrito) e instruções de fidelidade; antes, mostra o custo
+  estimado e só segue com confirmação. A copy é dividida em partes por
+  parágrafo (`STORY_CHUNK_CHARS`), uma chamada por parte; o servidor confere
+  que cada trecho citado existe na parte e o navegador valida tudo de novo
+  contra a copy inteira. A copy não vai para os logs.
+
+Tudo (copy, cenas, ligações com a biblioteca, prompts, aprovações, versões
+anteriores e histórico) fica salvo no IndexedDB (tabela `storyboards`, um por
+projeto) e volta depois de recarregar. Apagar o projeto apaga a historinha.
+
+Limitações desta etapa: a interpretação real (modelo de linguagem) ainda não
+foi testada com a API de verdade — só com respostas simuladas; a geração em
+lote das cenas fica para a próxima etapa; o ZIP do projeto ainda não inclui
+o storyboard.
+
 ## Armazenamento e exportação
 
 Projetos (fluxos) e imagens geradas são salvos **automaticamente** no
@@ -326,9 +422,9 @@ navegador, no IndexedDB (`src/persistence/`):
   geração falhar, as imagens anteriores são mantidas.
 - Apagar uma imagem, um nó ou um fluxo apaga os arquivos correspondentes.
 - A biblioteca de personagens usa a tabela `characters`; as fotos dela ficam
-  na tabela de arquivos como parte da biblioteca (não de um projeto). Tabelas
-  reservadas para as próximas etapas: storyboards, cenas, prompts e versões
-  de imagem.
+  na tabela de arquivos como parte da biblioteca (não de um projeto). A
+  historinha (copy + storyboard) usa a tabela `storyboards`. Tabelas
+  reservadas para as próximas etapas: cenas, prompts e versões de imagem.
 - Fluxos da versão anterior (que ficavam no `localStorage`) são copiados para
   o banco na primeira abertura. A cópia antiga **não é apagada**.
 
@@ -386,8 +482,8 @@ foram usadas.
 
 **Tela do fluxo** — canvas do React Flow com:
 - Botão de voltar (seta) + nome do fluxo no canto superior esquerdo. Clique
-  no nome pra renomear. Ao lado, os botões de exportar o fluxo em ZIP e do
-  guia de estilo.
+  no nome pra renomear. Ao lado, os botões de exportar o fluxo em ZIP, do
+  guia de estilo e da **Historinha** (copy, interpretação e storyboard).
 - Dock flutuante à esquerda com os botões **Prompt**, **Imagem** e
   **Referência** pra criar nós.
 

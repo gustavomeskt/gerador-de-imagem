@@ -1,6 +1,6 @@
 import { Background, Panel, ReactFlow, ReactFlowProvider } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useEffect, useMemo } from 'react'
+import { lazy, Suspense, useEffect, useMemo } from 'react'
 import { BrowserRouter, Navigate, Route, Routes, useNavigate, useParams } from 'react-router-dom'
 import FlowHeader from './components/FlowHeader'
 import Home from './components/Home'
@@ -13,7 +13,11 @@ import ReferenceNode from './nodes/ReferenceNode'
 import { FlowIdContext } from './store/flowIdContext'
 import { useCharacterStore } from './store/useCharacterStore'
 import { isValidFlowConnection, useFlowStore } from './store/useFlowStore'
+import { useStoryStore } from './store/useStoryStore'
 import './index.css'
+
+// tela da historinha carregada sob demanda (deixa o carregamento inicial leve)
+const StoryPage = lazy(() => import('./components/story/StoryPage'))
 
 const nodeTypes = { prompt: PromptNode, image: ImageNode, reference: ReferenceNode }
 
@@ -66,6 +70,18 @@ function FlowRoute() {
   )
 }
 
+function StoryRoute() {
+  const { id } = useParams<{ id: string }>()
+  const exists = useFlowStore((s) => !!id && s.flows.some((f) => f.id === id))
+  const navigate = useNavigate()
+  if (!id || !exists) return <Navigate to="/" replace />
+  return (
+    <Suspense fallback={<div className="ifs-app ifs-loading">Carregando historinha…</div>}>
+      <StoryPage flowId={id} onBack={() => navigate(`/flow/${id}`)} />
+    </Suspense>
+  )
+}
+
 function HomeRoute() {
   const navigate = useNavigate()
   return <Home onOpenFlow={(id) => navigate(`/flow/${id}`)} />
@@ -76,12 +92,15 @@ export default function App() {
   const hydrate = useFlowStore((s) => s.hydrate)
   const charactersHydrated = useCharacterStore((s) => s.hydrated)
   const hydrateCharacters = useCharacterStore((s) => s.hydrate)
-  const hydrated = flowsHydrated && charactersHydrated
+  const storiesHydrated = useStoryStore((s) => s.hydrated)
+  const hydrateStories = useStoryStore((s) => s.hydrate)
+  const hydrated = flowsHydrated && charactersHydrated && storiesHydrated
 
   useEffect(() => {
     void hydrate()
     void hydrateCharacters()
-  }, [hydrate, hydrateCharacters])
+    void hydrateStories()
+  }, [hydrate, hydrateCharacters, hydrateStories])
 
   if (!hydrated) {
     return (
@@ -99,6 +118,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<HomeRoute />} />
           <Route path="/flow/:id" element={<FlowRoute />} />
+          <Route path="/flow/:id/story" element={<StoryRoute />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </div>

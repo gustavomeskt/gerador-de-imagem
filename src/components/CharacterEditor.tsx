@@ -23,9 +23,23 @@ function formatDate(ts: number) {
 }
 
 // Cadastro / edição / visualização da ficha de um personagem.
-export default function CharacterEditor({ character, onClose }: { character?: Character; onClose: () => void }) {
+// initialName: pré-preenche o nome (cadastro a partir da historinha);
+// onSaved: recebe o id do personagem salvo.
+export default function CharacterEditor({
+  character,
+  onClose,
+  initialName,
+  onSaved,
+}: {
+  character?: Character
+  onClose: () => void
+  initialName?: string
+  onSaved?: (id: string) => void
+}) {
   const saveCharacter = useCharacterStore((s) => s.saveCharacter)
-  const [sheet, setSheet] = useState<CharacterSheet>(() => (character ? sheetOf(character) : emptySheet()))
+  const [sheet, setSheet] = useState<CharacterSheet>(() =>
+    character ? sheetOf(character) : { ...emptySheet(), ...(initialName ? { name: initialName } : {}) },
+  )
   const [photos, setPhotos] = useState<EditorPhoto[]>(() =>
     (character?.photos ?? []).map((p) => ({ key: nextKey(), kind: 'existing', photoId: p.id, src: p.src, name: p.name, missing: p.missing })),
   )
@@ -88,8 +102,10 @@ export default function CharacterEditor({ character, onClose }: { character?: Ch
       primaryIndex: Math.max(0, photos.findIndex((p) => p.key === primary)),
     })
     setSaving(false)
-    if (result.ok) onClose()
-    else setErrors([result.error])
+    if (result.ok) {
+      onSaved?.(result.id)
+      onClose()
+    } else setErrors([result.error])
   }
 
   return (

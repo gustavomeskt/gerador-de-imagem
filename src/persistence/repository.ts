@@ -116,6 +116,18 @@ export const repository = {
     })
   },
 
+  // --- storyboards (um por projeto; id = projectId, apagado junto com o projeto) ---
+
+  listStoryboards(): Promise<LibraryRecord[]> {
+    return run('read', async () => (await getDb()).getAll('storyboards'))
+  },
+
+  saveStoryboard(record: LibraryRecord): Promise<void> {
+    return run('write', async () => {
+      await (await getDb()).put('storyboards', record)
+    })
+  },
+
   getMeta<T>(key: string): Promise<T | undefined> {
     return run('read', async () => (await (await getDb()).get('meta', key))?.value as T | undefined)
   },

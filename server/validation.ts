@@ -204,3 +204,25 @@ export function validateEnhanceBody(body: unknown): { prompt: string } {
   rejectUnknownFields(obj, ['prompt'])
   return { prompt: readPrompt(obj.prompt, ENHANCE_MAX_PROMPT_CHARS) }
 }
+
+// Pedido de interpretação de historinha: só a copy (texto livre) e os nomes
+// dos personagens da biblioteca. Nada de URLs, ids ou fotos.
+export function validateStoryBody(body: unknown, config: ServerConfig): { copy: string; libraryNames: string[] } {
+  const b = asObject(body)
+  rejectUnknownFields(b, ['copy', 'libraryNames'])
+  if (typeof b.copy !== 'string') invalid('"copy" precisa ser um texto.')
+  // a copy é usada exatamente como veio (sem trim): as cenas apontam para
+  // posições dentro dela
+  const copy = b.copy
+  if (!copy.trim()) invalid('"copy" não pode ficar vazia.')
+  if (copy.length > config.maxStoryChars) {
+    invalid(`A copy passa do limite de ${config.maxStoryChars} caracteres (MAX_STORY_CHARS).`)
+  }
+  const names = b.libraryNames ?? []
+  if (!Array.isArray(names) || names.length > 300) invalid('"libraryNames" precisa ser uma lista de até 300 nomes.')
+  const libraryNames = names.map((n) => {
+    if (typeof n !== 'string' || !n.trim() || n.length > 80) invalid('Cada nome em "libraryNames" precisa ser um texto de até 80 caracteres.')
+    return n.trim()
+  })
+  return { copy, libraryNames: [...new Set(libraryNames)] }
+}

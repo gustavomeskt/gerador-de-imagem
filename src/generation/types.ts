@@ -44,7 +44,7 @@ export interface ImageJob {
 // chamadas pagas: sem ele o servidor recusa — é a confirmação explícita.
 export interface CostQuote {
   quoteId: string
-  kind: 'images' | 'enhance'
+  kind: 'images' | 'enhance' | 'story'
   expiresAt: string // ISO
   mode: 'simulated' | 'openai' // simulated = servidor não chama a OpenAI, nada é cobrado
   paid: boolean

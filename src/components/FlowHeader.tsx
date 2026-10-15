@@ -1,5 +1,6 @@
-import { ArrowLeft, FileArchive, Loader2, Palette } from 'lucide-react'
+import { ArrowLeft, BookOpen, FileArchive, Loader2, Palette } from 'lucide-react'
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { exportProjectZip } from '../export/exportProject'
 import { useFlowStore } from '../store/useFlowStore'
 import StyleGuideDialog from './StyleGuideDialog'
@@ -19,6 +20,7 @@ export default function FlowHeader({ flowId, onBack }: FlowHeaderProps) {
   const [exportMessage, setExportMessage] = useState<string | null>(null)
   const [styleOpen, setStyleOpen] = useState(false)
   const styleEnabled = useFlowStore((s) => s.flowsData[flowId]?.styleGuide?.enabled ?? false)
+  const navigate = useNavigate()
 
   function startEditing() {
     setDraft(name)
@@ -83,6 +85,15 @@ export default function FlowHeader({ flowId, onBack }: FlowHeaderProps) {
         title={styleEnabled ? 'Guia de estilo (ativo)' : 'Guia de estilo (desligado)'}
       >
         <Palette size={15} />
+      </button>
+      <button
+        type="button"
+        className="ifs-flow-header__back"
+        onClick={() => navigate(`/flow/${flowId}/story`)}
+        title="Historinha: copy, interpretação e storyboard"
+        aria-label="Historinha"
+      >
+        <BookOpen size={15} />
       </button>
       {styleOpen && <StyleGuideDialog flowId={flowId} onClose={() => setStyleOpen(false)} />}
       {exportMessage && (

@@ -9,7 +9,7 @@ import { HttpError } from './http'
 
 export interface QuoteRecord {
   id: string
-  kind: 'images' | 'enhance'
+  kind: 'images' | 'enhance' | 'story'
   fingerprint: string
   images: number
   remainingImages: number

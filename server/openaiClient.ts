@@ -1,5 +1,6 @@
 import { buildEnhancerBody, buildOpenAIEditForm, buildOpenAIImageBody } from '../src/generation/openaiRequest'
 import type { ImageGenerationRequest } from '../src/generation/types'
+import { buildStoryInterpretBody, STORY_MODEL_DEFAULT } from '../src/story/llmRequest'
 import { HttpError } from './http'
 
 // Única parte do sistema que fala com a OpenAI. A chave entra aqui só no
@@ -17,6 +18,15 @@ export interface ImageClient {
   // Geração orientada por imagens de referência (POST /v1/images/edits,
   // multipart com as fotos em image[] + input_fidelity quando aplicável)
   editImages(request: ImageGenerationRequest): Promise<UpstreamImage[]>
+  // Interpretação de UMA parte da copy de uma historinha. Devolve o JSON
+  // cru — quem chama valida antes de usar.
+  interpretStory(input: StoryChunkInput): Promise<unknown>
+}
+
+export interface StoryChunkInput {
+  chunk: string
+  part: { index: number; total: number }
+  libraryNames: string[]
 }
 
 // Remove qualquer coisa parecida com chave de API de um texto vindo de fora
@@ -39,6 +49,9 @@ export function createOpenAIClient(options: {
   imageTimeoutMs: number
   textTimeoutMs: number
   fetchImpl?: typeof fetch
+  storyModel?: string
+  storyMaxOutputTokens?: number
+  storyTimeoutMs?: number
 }): ImageClient {
   const { apiKey, baseUrl } = options
 
@@ -126,6 +139,37 @@ export function createOpenAIClient(options: {
         throw new HttpError(502, 'upstream_invalid', 'A OpenAI devolveu um prompt vazio.')
       }
       return text.trim()
+    },
+
+    async interpretStory(input) {
+      const body = buildStoryInterpretBody({
+        model: options.storyModel ?? STORY_MODEL_DEFAULT,
+        chunk: input.chunk,
+        part: input.part,
+        libraryNames: input.libraryNames,
+        maxOutputTokens: options.storyMaxOutputTokens ?? 16_000,
+      })
+      const data = (await call('/v1/chat/completions', body, options.storyTimeoutMs ?? options.textTimeoutMs)) as {
+        choices?: Array<{ finish_reason?: unknown; message?: { content?: unknown; refusal?: unknown } }>
+      }
+      const choice = data?.choices?.[0]
+      if (typeof choice?.message?.refusal === 'string' && choice.message.refusal) {
+        throw new HttpError(502, 'upstream_refused', 'O modelo se recusou a interpretar este trecho da copy.')
+      }
+      if (choice?.finish_reason === 'length') {
+        throw new HttpError(
+          502,
+          'upstream_truncated',
+          'A resposta do modelo foi cortada por tamanho. Diminua STORY_CHUNK_CHARS ou aumente STORY_MAX_OUTPUT_TOKENS no .env.',
+        )
+      }
+      const text = choice?.message?.content
+      if (typeof text !== 'string' || !text.trim()) throw new HttpError(502, 'upstream_invalid', 'O modelo devolveu uma interpretação vazia.')
+      try {
+        return JSON.parse(text)
+      } catch {
+        throw new HttpError(502, 'upstream_invalid', 'O modelo devolveu uma interpretação que não é JSON válido.')
+      }
     },
   }
 }

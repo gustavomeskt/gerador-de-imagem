@@ -6,11 +6,13 @@ import { publicConfig, type ServerConfig } from './config'
 import { HttpError, readJsonBody, sendError, sendJson } from './http'
 import { ConcurrencyLimiter, RateLimiter, UsageLedger, type Reservation } from './limits'
 import { createOpenAIClient, redactSecrets, type ImageClient } from './openaiClient'
-import { estimateEnhance, estimateImageJob, loadPriceTable, PRICES_REFERENCE_DATE, PRICES_SOURCE, type PriceTable } from './pricing'
+import { estimateEnhance, estimateImageJob, estimateStory, loadPriceTable, PRICES_REFERENCE_DATE, PRICES_SOURCE, type PriceTable } from './pricing'
 import { fingerprint, QuoteStore, type QuoteRecord } from './quotes'
 import { checkRequestOrigin } from './security'
 import { createSimulatedClient } from './simulatedClient'
-import { validateEnhanceBody, validateGenerateBody, validateImageJob } from './validation'
+import { interpretStoryChunks, storyChunks } from './story'
+import { validateEnhanceBody, validateGenerateBody, validateImageJob, validateStoryBody } from './validation'
+import { SIMULATED_MODEL } from '../src/story/simulatedInterpreter'
 
 // Rotas do backend:
 //   GET  /api/health            → { ok: true }
@@ -19,6 +21,8 @@ import { validateEnhanceBody, validateGenerateBody, validateImageJob } from './v
 //   POST /api/images/generate   → contrato do backendProvider.ts + cabeçalho X-Cost-Quote
 //   POST /api/prompts/quote     → orçamento do melhorador de prompt
 //   POST /api/prompts/enhance   → contrato do backendProvider.ts + cabeçalho X-Cost-Quote
+//   POST /api/story/quote       → orçamento da interpretação de uma historinha
+//   POST /api/story/interpret   → interpretação (JSON cru, validado) + cabeçalho X-Cost-Quote
 
 export const QUOTE_HEADER = 'x-cost-quote'
 
@@ -43,6 +47,9 @@ export function createDeps(config: ServerConfig, overrides: Partial<AppDeps> & {
           imageTimeoutMs: config.imageTimeoutMs,
           textTimeoutMs: config.textTimeoutMs,
           fetchImpl: overrides.fetchImpl,
+          storyModel: config.storyModel,
+          storyMaxOutputTokens: config.storyMaxOutputTokens,
+          storyTimeoutMs: config.storyTimeoutMs,
         })
       : createSimulatedClient({ latencyMs: 400 }))
 
@@ -100,6 +107,11 @@ function imageFingerprint(p: {
     references: (p.references ?? []).map((r) => [r.sha256, r.mimeType, r.byteLength, r.width, r.height]),
     inputFidelity: p.inputFidelity,
   })
+}
+
+// A interpretação orçada vale só para esta copy, estes nomes e este modelo.
+function storyFingerprint(story: { copy: string; libraryNames: string[] }, model: string) {
+  return fingerprint({ kind: 'story', copy: story.copy, libraryNames: story.libraryNames, model })
 }
 
 function quoteIdFrom(req: IncomingMessage): string | undefined {
@@ -213,6 +225,61 @@ async function route(req: IncomingMessage, res: ServerResponse, deps: AppDeps) {
       })
       const enhanced = await runPaid(deps, 0, usd, () => deps.client.enhancePrompt(prompt))
       return sendJson(res, 200, { prompt: enhanced })
+    }
+
+    case '/api/story/quote': {
+      allow('POST')
+      const story = validateStoryBody(await readJsonBody(req, config.maxStoryBodyBytes), config)
+      const chunks = storyChunks(story.copy, config.storyChunkChars)
+      const model = config.mode === 'openai' ? config.storyModel : SIMULATED_MODEL
+      const estimate = estimateStory(
+        { chunks, libraryNames: story.libraryNames, model: config.storyModel, maxOutputTokens: config.storyMaxOutputTokens },
+        deps.prices,
+      )
+      if (config.mode === 'openai') {
+        if (estimate.usd > config.maxCostPerJobUsd) {
+          throw new HttpError(
+            422,
+            'job_too_expensive',
+            `Custo estimado da interpretação (US$ ${estimate.usd.toFixed(2)}) acima do limite por pedido (US$ ${config.maxCostPerJobUsd.toFixed(2)}). Ajuste MAX_COST_PER_JOB_USD ou STORY_MAX_OUTPUT_TOKENS.`,
+          )
+        }
+        deps.ledger.assertWithinLimits(0, estimate.usd)
+      }
+      const quote = deps.quotes.create({
+        kind: 'story',
+        fingerprint: storyFingerprint(story, config.storyModel),
+        images: 0,
+        calls: 1,
+        usd: estimate.usd,
+      })
+      return sendJson(res, 200, {
+        ...toQuoteResponse(quote, deps, estimate.breakdown, estimate.notes),
+        story: { model, chunks: chunks.length },
+      })
+    }
+
+    case '/api/story/interpret': {
+      allow('POST')
+      const story = validateStoryBody(await readJsonBody(req, config.maxStoryBodyBytes), config)
+      deps.rateLimiter.check()
+      const usd = deps.quotes.consume(quoteIdFrom(req), {
+        kind: 'story',
+        fingerprint: storyFingerprint(story, config.storyModel),
+        images: 0,
+      })
+      const result = await runPaid(deps, 0, usd, () =>
+        interpretStoryChunks(deps.client, { ...story, chunkChars: config.storyChunkChars }),
+      )
+      return sendJson(res, 200, {
+        interpretation: result.interpretation,
+        mode: config.mode,
+        model: config.mode === 'openai' ? config.storyModel : SIMULATED_MODEL,
+        warnings:
+          config.mode === 'simulated'
+            ? ['Servidor em modo simulado: interpretação por regras, sem IA. Revise todas as cenas.', ...result.warnings]
+            : result.warnings,
+      })
     }
 
     default:

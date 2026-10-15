@@ -1,4 +1,5 @@
 import { isImageModel, MODEL_LABELS, type ImageModel } from '../src/generation/models'
+import { STORY_MODEL_DEFAULT } from '../src/story/llmRequest'
 import { DEFAULT_MAX_REFERENCE_BYTES, DEFAULT_MAX_REFERENCES, REFERENCE_SUPPORT } from '../src/generation/references'
 
 // Configuração do servidor, lida SÓ de variáveis de ambiente (arquivo .env na
@@ -36,6 +37,13 @@ export interface ServerConfig {
   quoteTtlMs: number
   dataDir: string
   priceTableFile: string | undefined
+  // interpretação de historinhas (modelo de linguagem)
+  storyModel: string
+  maxStoryChars: number
+  maxStoryBodyBytes: number
+  storyChunkChars: number
+  storyMaxOutputTokens: number
+  storyTimeoutMs: number
 }
 
 export class ConfigError extends Error {
@@ -70,6 +78,14 @@ function readList(env: Env, name: string): string[] | undefined {
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean)
+}
+
+// Só nomes de modelo simples (letras, números, ponto, hífen) — nada
+// arbitrário vai pra URL ou pro corpo da chamada.
+function readStoryModel(env: Env): string {
+  const model = (env.STORY_MODEL ?? STORY_MODEL_DEFAULT).trim()
+  if (!/^[a-z0-9][a-z0-9.-]{0,63}$/i.test(model)) throw new ConfigError(`STORY_MODEL inválido: "${model}".`)
+  return model
 }
 
 export function loadConfig(env: Env = process.env): ServerConfig {
@@ -112,6 +128,7 @@ export function loadConfig(env: Env = process.env): ServerConfig {
   const maxReferenceBytes =
     readNumber(env, 'MAX_REFERENCE_FILE_MB', DEFAULT_MAX_REFERENCE_BYTES / 1024 / 1024, { min: 0.1, max: 50 }) * 1024 * 1024
   // base64 ocupa 4/3 do tamanho original, + folga pro resto do JSON
+  const maxStoryChars = readNumber(env, 'MAX_STORY_CHARS', 60_000, { min: 100, max: 500_000 })
   const computedEditLimit = Math.ceil((maxReferenceImages * maxReferenceBytes * 4) / 3) + 1024 * 1024
 
   return {
@@ -138,6 +155,13 @@ export function loadConfig(env: Env = process.env): ServerConfig {
     quoteTtlMs: readNumber(env, 'QUOTE_TTL_SECONDS', 600, { min: 10, max: 86_400 }) * 1000,
     dataDir: (env.SERVER_DATA_DIR ?? 'server/.data').trim(),
     priceTableFile: env.PRICE_TABLE_FILE?.trim() || undefined,
+    storyModel: readStoryModel(env),
+    maxStoryChars,
+    // até 4 bytes por caractere em UTF-8, + folga para os nomes
+    maxStoryBodyBytes: maxStoryChars * 4 + 64 * 1024,
+    storyChunkChars: readNumber(env, 'STORY_CHUNK_CHARS', 12_000, { min: 500, max: 100_000 }),
+    storyMaxOutputTokens: readNumber(env, 'STORY_MAX_OUTPUT_TOKENS', 16_000, { min: 500, max: 128_000 }),
+    storyTimeoutMs: readNumber(env, 'OPENAI_STORY_TIMEOUT_MS', 180_000, { min: 1000, max: 900_000 }),
   }
 }
 
@@ -162,5 +186,6 @@ export function publicConfig(config: ServerConfig) {
       maxReferenceBytes: config.maxReferenceBytes,
     },
     referenceModels: config.allowedModels.filter((m) => REFERENCE_SUPPORT[m] !== null),
+    story: { model: config.storyModel, maxChars: config.maxStoryChars, chunkChars: config.storyChunkChars },
   }
 }

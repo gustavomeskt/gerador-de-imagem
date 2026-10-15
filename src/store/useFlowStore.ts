@@ -10,6 +10,7 @@ import { create } from 'zustand'
 import { clampCount, DEFAULT_MODEL, getSizeOption, isImageModel, MODEL_LABELS, MODEL_SIZES, type ImageModel } from '../generation/models'
 import { orderedPhotos, sheetOf, type Character, type CharacterSheet } from '../generation/characters'
 import { composePrompt } from '../generation/promptComposer'
+import { allocateCharacterPhotos } from '../generation/referencePlan'
 import { defaultStyleGuide, sizeForAspect, type StyleGuide } from '../generation/styleGuide'
 import {
   checkReferenceFile,
@@ -122,6 +123,9 @@ interface FlowState {
   hydrate: () => Promise<void>
   dismissStorageIssue: () => void
   resolveCostConfirmation: (confirmed: boolean) => void
+  // usado por outras telas (ex.: interpretação da historinha) para pedir a
+  // mesma confirmação explícita de custo
+  confirmCost: (title: string, quote: CostQuote) => Promise<boolean>
 
   onNodesChange: (flowId: string, changes: NodeChange[]) => void
   onEdgesChange: (flowId: string, changes: EdgeChange[]) => void
@@ -549,26 +553,14 @@ export const useFlowStore = create<FlowState>((set, get) => {
     // limite de fotos: a principal de cada personagem e todas as das
     // referências são obrigatórias; o que sobrar vai pras fotos extras dos
     // personagens, uma de cada vez (rodízio)
-    const required = cast.length + refPhotos
-    if (required > DEFAULT_MAX_REFERENCES) {
-      return {
-        error: `Esta cena precisa de ${required} fotos (1 por personagem + referências), acima do limite de ${DEFAULT_MAX_REFERENCES} por geração.`,
-      }
-    }
     const castPhotos = cast.map((c) => orderedPhotos(c).filter((p) => !p.missing))
-    const chosen = castPhotos.map((photos) => photos.slice(0, 1))
-    let budget = DEFAULT_MAX_REFERENCES - required
-    for (let round = 1; budget > 0; round++) {
-      let added = false
-      for (let i = 0; i < castPhotos.length && budget > 0; i++) {
-        if (castPhotos[i][round]) {
-          chosen[i].push(castPhotos[i][round])
-          budget -= 1
-          added = true
-        }
+    const allocation = allocateCharacterPhotos(castPhotos, refPhotos, DEFAULT_MAX_REFERENCES)
+    if (!allocation.ok) {
+      return {
+        error: `Esta cena precisa de ${allocation.required} fotos (1 por personagem + referências), acima do limite de ${DEFAULT_MAX_REFERENCES} por geração.`,
       }
-      if (!added) break
     }
+    const chosen = allocation.chosen
 
     const notes = node.data.castNotes ?? {}
     const images: PlannedImage[] = []
@@ -751,6 +743,8 @@ export const useFlowStore = create<FlowState>((set, get) => {
     },
 
     dismissStorageIssue: () => set({ storageIssue: null }),
+
+    confirmCost: (title, quote) => requestCostConfirmation(title, quote),
 
     resolveCostConfirmation: (confirmed) => {
       const resolve = pendingConfirmation
